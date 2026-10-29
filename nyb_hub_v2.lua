@@ -104,13 +104,10 @@ N.CFG = {
 	-- visual
 	Fullbright      = false,
 	NoFog           = false,
-	AntiFlash       = false,
 	CamFov          = false,
 	CamFovValue     = 90,
 
 	-- auto
-	AutoRepair      = false,
-	GenPerfect      = false,
 	AutoHeal        = false,
 	AutoParry       = false,
 	KillAura        = false,
@@ -978,6 +975,7 @@ N.buildUI = function()
 				N.ui.toggle(tab, "Fly", "FlyOn", function() N.applyFly() end)
 				N.ui.slider(tab, "Fly Speed", "FlySpeed", 10, 400, 0)
 				N.ui.toggle(tab, "Noclip", "NoclipOn", function() N.applyNoclip() end)
+				N.ui.toggle(tab, "Infinite Jump", "InfJump", nil)
 			elseif t.name == "Visual" then
 				N.ui.header(tab, "Layar")
 				N.ui.toggle(tab, "Fullbright", "Fullbright", function() N.applyFullbright() end)
