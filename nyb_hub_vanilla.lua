@@ -352,6 +352,12 @@ local CFG = {
 	VeilFovShow      = false,
 	VeilFov          = 150,
 	FlaskLaser       = false,
+	-- ==== PORT GRUP 7 (Generator: skill check mode + multi-repair) ====
+	SkillCheckPro    = false,
+	SkillCheckProMode= "Instant",
+	GenBoost         = false,
+	GenBoostMode     = "Manual Repair",
+	GenBoostRange    = 8,
 	FakeName       = "NYB HUB",
 }
 
@@ -8290,6 +8296,265 @@ do
 	end)
 end
 
+--===================== [ 11h. PORT AERIS: GRUP 7 ] ========================
+-- Port ADITIF dari source Aeris (grup "Generator"):
+--   Skill Check Mode  -- Auto.SkillCheck + SkillCheckMode (baris 6326-6440, 14642-14659)
+--   Gen Boost         -- multi-repair (6714-6824, 14661-14695), helper
+--                        GetAllGenerators (6478) / GetGeneratorPoints (6539) /
+--                        waitForRepairing (6638).
+--
+-- Catatan penting: loop skill check Aeris ini BENTROK kalau dijalanin bareng
+-- "Auto Perfect Skillcheck" (CFG.GenPerfect) milik NYB -- dua-duanya nge-klik
+-- prompt yang sama. Makanya ini toggle terpisah, dan labelnya nyaranin matiin
+-- yang lama. Nggak ada satu baris pun milik NYB yang diubah.
+--
+-- Key baru: SkillCheckPro(+Mode), GenBoost(+Mode/Range). Default OFF.
+do
+	local Players = game:GetService("Players")
+	local lp = Players.LocalPlayer
+	local RunService = game:GetService("RunService")
+	local VIM = game:GetService("VirtualInputManager")
+	local R = NYB.remotes
+	local S = NYB.state
+
+	S.genProcessed = S.genProcessed or {}
+
+	--=========== A. SKILL CHECK PRO ===========
+	-- Sumber: kalau "Random" dan event kingScourgeStart nyala, sesi itu
+	-- dianggap normal (jendelanya lebih lebar). Kita dengerin remote yang sama.
+	if R.kingStart then
+		NYB.bind(R.kingStart.OnClientEvent, function()
+			if CFG.SkillCheckProMode == "Random" then S.skillRandomNormal = true end
+		end)
+	end
+
+	local function pressCheck()
+		local pg = lp:FindFirstChild("PlayerGui")
+		local mob = pg and pg:FindFirstChild("Survivor-mob")
+		local controls = mob and mob:FindFirstChild("Controls")
+		local btn = controls and (controls:FindFirstChild("action") or controls:FindFirstChild("check"))
+		if btn and btn:IsA("GuiObject") and btn.Visible and type(firesignal) == "function" then
+			pcall(function()
+				firesignal(btn.MouseButton1Down)
+				task.wait(0.005)
+				firesignal(btn.MouseButton1Up)
+			end)
+			return true
+		end
+		pcall(function()
+			VIM:SendKeyEvent(true, Enum.KeyCode.Space, false, game)
+			task.wait(0.005)
+			VIM:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
+		end)
+		return true
+	end
+
+	local function skillCheckStep()
+		local pg = lp:FindFirstChild("PlayerGui")
+		if not pg then return end
+		local gui = pg:FindFirstChild("SkillCheckPromptGui")
+		if not gui then return end
+		local check = gui:FindFirstChild("Check")
+		if not (check and check.Visible) then return end
+		local line = check:FindFirstChild("Line")
+		local goal = check:FindFirstChild("Goal")
+		if not line or not goal then return end
+
+		local mode = CFG.SkillCheckProMode or "Instant"
+		local instant = (mode == "Instant")
+		if not instant and mode == "Random" then
+			instant = not S.skillRandomNormal
+		end
+
+		if instant then
+			line.Rotation = goal.Rotation + 109
+			S.skillBusy = true
+			task.spawn(function()
+				pressCheck()
+				task.wait(0.05)
+				S.skillBusy = false
+			end)
+			return
+		end
+
+		-- Legit / Normal / Random-normal: tunggu jarum masuk jendela dulu,
+		-- baru tekan. Legit pakai jendela paling sempit (102-116).
+		local normal = (mode == "Normal") or (mode == "Random" and S.skillRandomNormal)
+		local lr = line.Rotation % 360
+		local gr = goal.Rotation % 360
+		local lo, hi
+		if normal then
+			lo, hi = (gr + 116) % 360, (gr + 140) % 360
+		else
+			lo, hi = (gr + 102) % 360, (gr + 116) % 360
+		end
+		local inWindow
+		if lo <= hi then
+			inWindow = lr >= lo and lr <= hi
+		else
+			inWindow = lr >= lo or lr <= hi
+		end
+		if inWindow then
+			S.skillBusy = true
+			task.spawn(function()
+				pressCheck()
+				task.wait(0.05)
+				S.skillBusy = false
+			end)
+		end
+	end
+
+	NYB.bind(RunService.Heartbeat, function()
+		if not NYB.alive then return end
+		if not CFG.SkillCheckPro or S.skillBusy then return end
+		pcall(skillCheckStep)
+	end)
+
+	--=========== B. GEN BOOST (MULTI-REPAIR) ===========
+	-- Trik Aeris: karakter di-anchor di tiap titik generator satu-satu dan
+	-- tiap kunjungan kirim RepairEvent(point, true) -- jadi beberapa titik
+	-- kepegang sekaligus. Habis itu dilepas: Manual (kirim false di titik
+	-- awal) atau Auto Repair (muter terus di titik-titik generator itu).
+	local function allGenerators()
+		local out = {}
+		local map = workspace:FindFirstChild("Map")
+		if not map then return out end
+		for _, d in ipairs(map:GetDescendants()) do
+			if d:IsA("Model") and d.Name == "Generator" then
+				if d:GetAttribute("RepairProgress") ~= nil
+					or d:GetAttribute("ProgressRepair") ~= nil
+					or d:GetAttribute("kickcount") ~= nil then
+					table.insert(out, d)
+				end
+			end
+		end
+		return out
+	end
+
+	local function genPoints(model)
+		local out = {}
+		if not model then return out end
+		for _, c in ipairs(model:GetChildren()) do
+			if c:IsA("BasePart") and string.find(c.Name, "GeneratorPoint", 1, true) then
+				table.insert(out, c)
+			end
+		end
+		return out
+	end
+
+	local function waitRepairing(point, timeout)
+		local t0 = tick()
+		while tick() - t0 < (timeout or 1) do
+			if point:GetAttribute("IsRepairing") == true then return true end
+			task.wait(0.05)
+		end
+		return false
+	end
+
+	NYB.genAutoLoop = function(model)
+		if S.genAutoThread then return end
+		S.genAutoThread = true
+		task.spawn(function()
+			while NYB.alive and CFG.GenBoost and S.genAutoRepair do
+				local pts = genPoints(model)
+				if #pts == 0 then
+					task.wait(0.3)
+				else
+					for _, p in ipairs(pts) do
+						if not (NYB.alive and CFG.GenBoost and S.genAutoRepair) then break end
+						if R.genRepair then pcall(function() R.genRepair:FireServer(p, true) end) end
+						task.wait(0.2)
+					end
+				end
+			end
+			S.genAutoThread = false
+		end)
+	end
+
+	NYB.multiRepair = function(point)
+		if not point then
+			NYB.msg("Multi-Repair: nggak ada GeneratorPoint dekat (maks " .. CFG.GenBoostRange .. " stud).")
+			return
+		end
+		local parent = point.Parent
+		if S.genProcessed[parent] then
+			NYB.msg("Generator ini udah kepegang.")
+			return
+		end
+		S.genProcessed[parent] = true
+
+		local hrp = NYB.hrp()
+		if not hrp then S.genProcessed[parent] = nil return end
+		local origin = hrp.CFrame
+
+		pcall(function()
+			for _, p in ipairs(genPoints(parent)) do
+				if p ~= point and p.Parent then
+					hrp.Anchored = true
+					hrp.CFrame = p.CFrame
+					task.wait(0.15)
+					if R.genRepair then pcall(function() R.genRepair:FireServer(p, true) end) end
+
+					if not waitRepairing(p, 0.8) then
+						if R.genRepair then pcall(function() R.genRepair:FireServer(p, false) end) end
+						task.wait(0.1)
+						hrp.CFrame = p.CFrame
+						task.wait(0.15)
+						if R.genRepair then pcall(function() R.genRepair:FireServer(p, true) end) end
+						waitRepairing(p, 0.5)
+					end
+
+					hrp.Anchored = false
+					task.wait(0.05)
+				end
+			end
+		end)
+
+		pcall(function()
+			if hrp and hrp.Parent then
+				hrp.Anchored = false
+				hrp.CFrame = origin
+			end
+		end)
+
+		task.wait(0.1)
+
+		if CFG.GenBoostMode == "Manual Repair" then
+			if R.genRepair then pcall(function() R.genRepair:FireServer(point, false) end) end
+		else
+			S.genAutoRepair = true
+			NYB.genAutoLoop(parent)
+		end
+	end
+
+	NYB.genBoostNearest = function()
+		if not CFG.GenBoost then
+			NYB.msg("Nyalain dulu toggle Gen Boost (Multi-Repair).")
+			return
+		end
+		local hrp = NYB.hrp()
+		if not hrp then return end
+		local best, bd = nil, CFG.GenBoostRange
+		for _, m in ipairs(allGenerators()) do
+			for _, p in ipairs(genPoints(m)) do
+				local d = (p.Position - hrp.Position).Magnitude
+				if d < bd then bd = d; best = p end
+			end
+		end
+		if best then
+			NYB.multiRepair(best)
+		else
+			NYB.msg("Gen Boost: nggak ada generator dalam " .. CFG.GenBoostRange .. " stud.")
+		end
+	end
+
+	NYB.genBoostStop = function()
+		S.genAutoRepair = false
+		S.genProcessed = {}
+		S.genAutoThread = nil
+	end
+end
+
 --===================== [ 13. UI BUILD ] ===================================
 do
 	local U = NYB.ui
@@ -8621,6 +8886,20 @@ do
 	U.toggle(T.auto.page, "Silent Veil FOV Circle", "VeilFovShow", function(v) CFG.VeilFovShow = v end)
 	U.slider(T.auto.page, "Veil FOV Radius", 30, 500, CFG.VeilFov, 0, function(v) CFG.VeilFov = v end)
 	U.toggle(T.auto.page, "Flask Laser (killer)", "FlaskLaser", function(v) CFG.FlaskLaser = v end)
+
+	U.section(T.auto.page, "Generator (port Aeris)")
+	U.toggle(T.auto.page, "Skill Check Pro", "SkillCheckPro", function(v)
+		CFG.SkillCheckPro = v
+		if v then NYB.msg("Skill Check Pro ON — matiin 'Auto Perfect Skillcheck' biar nggak dobel.") end
+	end)
+	U.dropdown(T.auto.page, "Skill Check Mode", { "Legit", "Instant", "Normal", "Random" }, "Instant", "SkillCheckProMode", function(v) CFG.SkillCheckProMode = v end)
+	U.toggle(T.auto.page, "Gen Boost (Multi-Repair)", "GenBoost", function(v)
+		CFG.GenBoost = v
+		if not v then NYB.genBoostStop() end
+	end)
+	U.dropdown(T.auto.page, "Gen Boost Mode", { "Manual Repair", "Auto Repair" }, "Manual Repair", "GenBoostMode", function(v) CFG.GenBoostMode = v end)
+	U.slider(T.auto.page, "Gen Boost Range", 4, 30, CFG.GenBoostRange, 0, function(v) CFG.GenBoostRange = v end)
+	U.button(T.auto.page, "Multi-Repair Generator Terdekat", NYB.genBoostNearest)
 	U.label(T.auto.page, "Veil FOV nyala pas kamu Killer + spear mode; Flask Laser pas ngunyah flask.", NYB.ui.colors.dim)
 
 	U.section(T.auto.page, "Auto Drop Pallet")
