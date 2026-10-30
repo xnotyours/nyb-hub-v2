@@ -312,6 +312,36 @@ local CFG = {
 	CrownVfx       = true,
 	KorlessMorph   = false,
 	SkipEndscreen  = false,
+	-- ==== PORT GRUP 4 (Silent Aim pistol / Auto Parry / Auto Drop Pallet) ====
+	PistolSilentAim   = false,
+	PistolTarget      = "Killer",
+	PistolPredict     = false,
+	PistolPredEff     = 0.85,
+	PistolPredSmooth  = 0.4,
+	PistolSpeed       = 500,
+	PistolWallcheck   = false,
+	PistolBlockKnocked= false,
+	PistolBlockBullet = false,
+	PistolLockAim     = false,
+	PistolLaser       = false,
+	ParryV1           = false,
+	ParryV1Safety     = false,
+	ParryV1Aggressive = false,
+	ParryV1Circle     = false,
+	ParryV1Radius     = 15,
+	ParryV1Face       = 0.7,
+	ParryV1Cooldown   = 0.5,
+	ParryV2           = false,
+	ParryV2Safety     = false,
+	ParryV2Mode       = "Legit",
+	ParryV2Trigger    = "Remote",
+	ParryV2Range      = 12,
+	ParryV2Face       = 0.6,
+	ParryV2Circle     = false,
+	AutoPallet        = false,
+	AutoPalletSafety  = false,
+	AutoPalletDist    = 10,
+	AutoPalletCooldown= 2.5,
 	FakeName       = "NYB HUB",
 }
 
@@ -352,6 +382,13 @@ do
 	NYB.hum = function()
 		local char = lp.Character
 		return char and char:FindFirstChildOfClass("Humanoid")
+	end
+
+	-- Dipakai bareng-bareng lintas blok port (kontrak port nyebut NYB.char),
+	-- tapi sebelumnya cuma NYB.hrp/NYB.hum yang ada -- nambahin ini nutup
+	-- lubang itu, bukan ngubah perilaku fitur mana pun.
+	NYB.char = function()
+		return lp.Character
 	end
 
 	-- deteksi role: Team-based (utama) + fallback atribut/heuristik
@@ -6714,6 +6751,1116 @@ do
 	NYB_ENV.NYB_UNLOAD = NYB.unload
 end
 
+--===================== [ 11e. PORT AERIS: GRUP 4 ] =========================
+-- Port ADITIF dari source Aeris: Silent Aim pistol "Twist of Fate"
+-- (baris 14696-15673), Auto Parry sensor V1 + V2 (2995-4545), dan
+-- Auto Drop Pallet (4951-5419).
+--
+-- Nol fitur lama disentuh. Yang sudah ada di NYB (CFG.AutoParry,
+-- CFG.CounterParry, CFG.SilentToF, tombol "Drop All Pallets") tetap apa
+-- adanya -- semua yang di sini pakai key baru: Pistol*, ParryV1*, ParryV2*,
+-- AutoPallet*. Parry sensor di sini beda mekanisme: dia nempel ke Animator
+-- si killer dan nyala waktu animasi serangan-nya main, bukan nebak jarak.
+do
+	local Players = game:GetService("Players")
+	local lp = Players.LocalPlayer
+	local RunService = game:GetService("RunService")
+	local UIS = game:GetService("UserInputService")
+	local RS = game:GetService("ReplicatedStorage")
+	local CollectionService = game:GetService("CollectionService")
+	local VIM = game:GetService("VirtualInputManager")
+	local cam = workspace.CurrentCamera
+	local R = NYB.remotes
+	local S = NYB.state
+
+	-- CoreGui bisa dikunci di beberapa executor -- gethui() dulu, baru fallback.
+	local function guiHost()
+		local ok, hui = pcall(function() return gethui and gethui() or nil end)
+		if ok and hui then return hui end
+		return game:GetService("CoreGui")
+	end
+
+	--=========== A. SILENT AIM PISTOL (Twist of Fate) ===========
+
+	-- Senjata ToF nempel di rig karakter, bukan di Backpack. Kalau slotnya
+	-- kosong, balikin model "Twist of Fate" aja -- posisi muzzle masih kepake.
+	local function pistolGun()
+		local char = NYB.char()
+		if not char then return nil end
+		local tof = char:FindFirstChild("Twist of Fate", true)
+		if not tof then return nil end
+		local arm = tof:FindFirstChild("Right Arm")
+		if arm then
+			local g = arm:FindFirstChild("gun") or arm:FindFirstChild("EmperorGun")
+			if g then return g end
+		end
+		return tof
+	end
+
+	local function pistolMuzzle()
+		local gun = pistolGun()
+		if not gun then return nil end
+		local ok, pos = pcall(function()
+			if gun:IsA("BasePart") then return gun.Position end
+			local bp = gun:FindFirstChildOfClass("BasePart")
+			return bp and bp.Position or nil
+		end)
+		if ok and pos then return pos end
+		local hrp = NYB.hrp()
+		return hrp and (hrp.Position + Vector3.new(0, 1.5, 0)) or nil
+	end
+
+	-- Wallcheck versi Aeris: petakan dulu yang punya kita + target, biar
+	-- pistol sendiri nggak kebaca sebagai dinding.
+	local function pistolVisible(from, to, other)
+		local d = to - from
+		if d.Magnitude < 0.1 then return true end
+		local p = RaycastParams.new()
+		p.FilterType = Enum.RaycastFilterType.Exclude
+		local f = {}
+		local char = NYB.char()
+		if char then table.insert(f, char) end
+		if other and other ~= char then table.insert(f, other) end
+		if S.pistolLaser then table.insert(f, S.pistolLaser) end
+		p.FilterDescendantsInstances = f
+		return workspace:Raycast(from, d.Unit * d.Magnitude, p) == nil
+	end
+
+	-- Kecepatan target dihaluskan (lerp), karena velocity mentah HRP goyang
+	-- dan bikin lead melompat-lompat.
+	local function pistolVel(char)
+		local hrp = char and char:FindFirstChild("HumanoidRootPart")
+		if not hrp then return Vector3.zero end
+		local prev = S.pistolVel and S.pistolVel[char]
+		local now = tick()
+		if prev then
+			local dt = now - prev.t
+			if dt > 0.001 and dt < 0.1 then
+				local v = prev.v:Lerp((hrp.Position - prev.p) / dt, CFG.PistolPredSmooth)
+				S.pistolVel[char] = { p = hrp.Position, v = v, t = now }
+				return v
+			end
+		end
+		if not S.pistolVel then S.pistolVel = {} end
+		S.pistolVel[char] = { p = hrp.Position, v = hrp.AssemblyLinearVelocity, t = now }
+		return hrp.AssemblyLinearVelocity
+	end
+
+	-- Prediksi ToF: penyelesaian kuadratik |delta + v*t| = speed*t.
+	-- Ini yang bikin peluru pistol kena target yang lagi lari.
+	local function pistolPredict(origin, part, char, speed)
+		speed = speed or 500
+		local pos = part.Position
+		if (pos - origin).Magnitude < 8 then return pos end
+		local v = pistolVel(char)
+		local d = pos - origin
+		local a = v:Dot(v) - speed * speed
+		local b = 2 * d:Dot(v)
+		local c = d:Dot(d)
+		local t
+		if math.abs(a) < 0.01 then
+			if math.abs(b) > 0.01 then t = -c / b end
+		else
+			local disc = b * b - 4 * a * c
+			if disc >= 0 then
+				local sq = math.sqrt(disc)
+				local t1 = (-b - sq) / (2 * a)
+				local t2 = (-b + sq) / (2 * a)
+				if t1 > 0.001 then t = t1 elseif t2 > 0.001 then t = t2 end
+			end
+		end
+		if not t then return pos end
+		return pos + v * CFG.PistolPredEff * t
+	end
+
+	-- Mode target: Killer = paling dekat, Survivors/Zombie = yang paling
+	-- lurus sama arah kamera (biar nggak nembak orang di belakang).
+	local function pistolTarget()
+		local char = NYB.char()
+		local hrp = char and char:FindFirstChild("HumanoidRootPart")
+		if not char or not hrp then return nil end
+		if not pistolGun() then return nil end
+		local origin = pistolMuzzle() or hrp.Position
+		local mode = CFG.PistolTarget or "Killer"
+		local best, bchar, bestScore = nil, nil, -math.huge
+		for _, plr in ipairs(Players:GetPlayers()) do
+			if plr ~= lp and plr.Character then
+				local role = NYB.role(plr)
+				local okMode = (mode == "Killer" and role == "Killer")
+					or (mode == "Survivors" and role ~= "Killer")
+					or (mode == "Zombie" and role == "Zombie")
+				if okMode then
+					local ox = plr.Character
+					local part = ox:FindFirstChild("Torso") or ox:FindFirstChild("UpperTorso")
+						or ox:FindFirstChild("HumanoidRootPart")
+					if part then
+						if mode == "Killer" then
+							local d = (part.Position - origin).Magnitude
+							if -d > bestScore then bestScore = -d; best = part; bchar = ox end
+						else
+							local dot = cam.CFrame.LookVector:Dot((part.Position - cam.CFrame.Position).Unit)
+							if dot > 0.5 and dot > bestScore then bestScore = dot; best = part; bchar = ox end
+						end
+					end
+				end
+			end
+		end
+		if not best then return nil end
+		if CFG.PistolWallcheck and not pistolVisible(origin, best.Position, bchar) then return nil end
+		local aim = best.Position
+		if CFG.PistolPredict then
+			aim = pistolPredict(origin, best, bchar, CFG.PistolSpeed)
+		end
+		return best, bchar, origin, aim
+	end
+
+	local function pistolLaser(from, to)
+		if not S.pistolLaser or not S.pistolLaser.Parent then
+			local p = Instance.new("Part")
+			p.Name = "NYB_ToFLaser"
+			p.Anchored = true
+			p.CanCollide = false
+			p.CanTouch = false
+			p.CanQuery = false
+			p.CastShadow = false
+			p.Material = Enum.Material.Neon
+			p.Color = Color3.fromRGB(255, 50, 50)
+			p.Parent = workspace
+			S.pistolLaser = p
+		end
+		local p = S.pistolLaser
+		local d = to - from
+		p.Size = Vector3.new(0.05, 0.05, d.Magnitude)
+		p.CFrame = CFrame.new((from + to) / 2, to)
+		p.Transparency = 0
+	end
+
+	local function pistolHide()
+		if S.pistolLaser then S.pistolLaser.Transparency = 1 end
+	end
+
+	-- Tembakan cuma dikirim waktu tombol dilepas, sama kayak Aeris: arah
+	-- diambil dari target yang ke-lock frame itu, bukan dari mouse.
+	local function pistolShoot()
+		if not CFG.PistolSilentAim then return end
+		local char = NYB.char()
+		if not char then return end
+		if CFG.PistolBlockKnocked
+			and (char:GetAttribute("Knocked") == true or char:GetAttribute("IsHooked") == true) then
+			return
+		end
+		local part, _, origin, aim = pistolTarget()
+		if not part or not origin or not aim then return end
+		local dir = aim - origin
+		if dir.Magnitude < 0.001 then return end
+		if R.twistFire then
+			local gun = pistolGun()
+			pcall(function() R.twistFire:FireServer(gun, dir.Unit) end)
+		end
+	end
+
+	-- Bullet block: FireServer ke remote "Fire" di bawah "Twist of Fate"
+	-- dibuang sebelum nyampe server, jadi amunisi nggak kepotong. Chain ke
+	-- mt.__namecall yang lagi aktif (NYB.installHook bisa udah masang duluan).
+	NYB.installPistolHook = function()
+		if S.pistolHooked then return true end
+		local ok = pcall(function()
+			local mt = getrawmetatable(game)
+			local old = mt.__namecall
+			setreadonly(mt, false)
+			mt.__namecall = newcclosure(function(self, ...)
+				local m = getnamecallmethod()
+				if (m == "FireServer" or m == "InvokeServer") and not checkcaller()
+					and typeof(self) == "Instance" and CFG.PistolBlockBullet then
+					if self.Name == "Fire" and self.Parent and self.Parent.Name == "Twist of Fate" then
+						return nil
+					end
+				end
+				return old(self, ...)
+			end)
+			setreadonly(mt, true)
+			S.pistolHooked = true
+		end)
+		if not ok then NYB.msg("Hook pistol nggak didukung executor ini.") end
+		return ok
+	end
+
+	-- Selector target (pola Aeris: kotak kecil bisa di-drag, daftar mode
+	-- mekar ke bawah). Hotkey K/J/L sama seperti sumbernya.
+	local MODES = {
+		{ internal = "Killer",    display = "Killer (K)",    on = Color3.fromRGB(180, 45, 45),  txt = Color3.fromRGB(255, 180, 180) },
+		{ internal = "Survivors", display = "Survivors (J)", on = Color3.fromRGB(25, 80, 150),  txt = Color3.fromRGB(160, 210, 255) },
+		{ internal = "Zombie",    display = "Zombie (L)",    on = Color3.fromRGB(120, 80, 10),  txt = Color3.fromRGB(255, 210, 100) },
+	}
+
+	NYB.pistolSelector = function(on)
+		if not on then
+			if S.pistolGui then
+				pcall(function() S.pistolGui:Destroy() end)
+				S.pistolGui = nil
+			end
+			return
+		end
+		if S.pistolGui and S.pistolGui.Parent then return end
+
+		local host = guiHost()
+		if not host then return end
+		local old = host:FindFirstChild("NYB_ToFTargetSelector")
+		if old then pcall(function() old:Destroy() end) end
+
+		local gui = Instance.new("ScreenGui")
+		gui.Name = "NYB_ToFTargetSelector"
+		gui.ResetOnSpawn = false
+		gui.IgnoreGuiInset = true
+		gui.Parent = host
+
+		local main = Instance.new("Frame")
+		main.Name = "Main"
+		main.Size = UDim2.new(0, 165, 0, 30)
+		main.Position = UDim2.new(0.5, -82, 0, 30)
+		main.BackgroundTransparency = 1
+		main.Active = true
+		main.Parent = gui
+
+		local head = Instance.new("TextButton")
+		head.Size = UDim2.new(1, 0, 1, 0)
+		head.BackgroundColor3 = Color3.fromRGB(15, 15, 20)
+		head.BackgroundTransparency = 0.25
+		head.BorderSizePixel = 0
+		head.Font = Enum.Font.GothamBold
+		head.TextSize = 11
+		head.TextColor3 = Color3.fromRGB(240, 240, 240)
+		head.Text = "Target: " .. tostring(CFG.PistolTarget or "Killer") .. "   >"
+		head.Parent = main
+		Instance.new("UICorner", head).CornerRadius = UDim.new(0, 8)
+		local stroke = Instance.new("UIStroke", head)
+		stroke.Color = Color3.fromRGB(100, 100, 110)
+		stroke.Thickness = 1.2
+		stroke.Transparency = 0.3
+
+		local list = Instance.new("Frame")
+		list.Size = UDim2.new(1, 0, 0, 0)
+		list.Position = UDim2.new(0, 0, 1, 5)
+		list.BackgroundColor3 = Color3.fromRGB(15, 15, 20)
+		list.BackgroundTransparency = 0.25
+		list.BorderSizePixel = 0
+		list.ClipsDescendants = true
+		list.Visible = false
+		list.AutomaticSize = Enum.AutomaticSize.Y
+		list.Parent = main
+		Instance.new("UICorner", list).CornerRadius = UDim.new(0, 8)
+		local listStroke = Instance.new("UIStroke", list)
+		listStroke.Color = Color3.fromRGB(80, 80, 90)
+		listStroke.Thickness = 1.2
+		listStroke.Transparency = 0.4
+		local lay = Instance.new("UIListLayout", list)
+		lay.FillDirection = Enum.FillDirection.Vertical
+		lay.SortOrder = Enum.SortOrder.LayoutOrder
+		lay.Padding = UDim.new(0, 4)
+		local pad = Instance.new("UIPadding", list)
+		pad.PaddingTop = UDim.new(0, 4)
+		pad.PaddingBottom = UDim.new(0, 4)
+		pad.PaddingLeft = UDim.new(0, 4)
+		pad.PaddingRight = UDim.new(0, 4)
+
+		local open = false
+		local btns = {}
+
+		local function repaint()
+			local cur = CFG.PistolTarget or "Killer"
+			head.Text = string.format("Target: %s   %s", cur, open and "v" or ">")
+			list.Visible = open
+			for _, m in ipairs(MODES) do
+				local b = btns[m.internal]
+				if b then
+					if m.internal == cur then
+						b.BackgroundColor3 = m.on
+						b.TextColor3 = m.txt
+					else
+						b.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
+						b.TextColor3 = Color3.fromRGB(150, 150, 150)
+					end
+				end
+			end
+		end
+
+		for i, m in ipairs(MODES) do
+			local b = Instance.new("TextButton")
+			b.Size = UDim2.new(1, 0, 0, 26)
+			b.BorderSizePixel = 0
+			b.Font = Enum.Font.GothamBold
+			b.TextSize = 10
+			b.Text = m.display
+			b.LayoutOrder = i
+			b.Parent = list
+			Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
+			local function pick()
+				CFG.PistolTarget = m.internal
+				open = false
+				repaint()
+			end
+			b.MouseButton1Click:Connect(pick)
+			b.InputEnded:Connect(function(input)
+				if input.UserInputType == Enum.UserInputType.Touch then pick() end
+			end)
+			btns[m.internal] = b
+		end
+		repaint()
+
+		local dragging, moved, startInput, startPos, framePos = false, false, nil, nil, nil
+		head.InputBegan:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1
+				or input.UserInputType == Enum.UserInputType.Touch then
+				dragging = true
+				moved = false
+				startInput = input
+				startPos = input.Position
+				framePos = main.Position
+			end
+		end)
+		head.InputEnded:Connect(function(input)
+			if input ~= startInput then return end
+			dragging = false
+			if not moved then
+				open = not open
+				repaint()
+			end
+			startInput = nil
+		end)
+		NYB.bind(UIS.InputChanged, function(input)
+			if not dragging then return end
+			local isDrag = (input.UserInputType == Enum.UserInputType.Touch and input == startInput)
+				or (input.UserInputType == Enum.UserInputType.MouseMovement
+					and startInput and startInput.UserInputType == Enum.UserInputType.MouseButton1)
+			if not isDrag then return end
+			local delta = input.Position - startPos
+			if math.abs(delta.X) > 4 or math.abs(delta.Y) > 4 then moved = true end
+			if moved then
+				local pos = UDim2.new(framePos.X.Scale, framePos.X.Offset + delta.X,
+					framePos.Y.Scale, framePos.Y.Offset + delta.Y)
+				main.Position = pos
+			end
+		end)
+		S.pistolGui = gui
+	end
+
+	-- Hotkey K/J/L buat ganti mode pas silent aim nyala.
+	NYB.bind(UIS.InputBegan, function(input, gameProcessed)
+		if gameProcessed or not CFG.PistolSilentAim then return end
+		if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+		local map = { K = "Killer", J = "Survivors", L = "Zombie" }
+		local pick = input.KeyCode and map[input.KeyCode.Name]
+		if pick and CFG.PistolTarget ~= pick then
+			CFG.PistolTarget = pick
+			NYB.msg("Silent aim target: " .. pick)
+		end
+	end)
+
+	-- Hold: RMB (desktop) atau tombol Gui-mob (HP). Lepas = tembak.
+	NYB.bind(UIS.InputBegan, function(input, gameProcessed)
+		if not CFG.PistolSilentAim then return end
+		if input.UserInputType == Enum.UserInputType.MouseButton2 then
+			S.pistolHeld = true
+		elseif input.UserInputType == Enum.UserInputType.MouseButton1 and not gameProcessed then
+			S.pistolHeld = true
+			pistolShoot()
+		end
+	end)
+	NYB.bind(UIS.InputEnded, function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1
+			or input.UserInputType == Enum.UserInputType.MouseButton2 then
+			S.pistolHeld = false
+			pistolHide()
+		end
+	end)
+
+	NYB.pistolMobileHook = function(container)
+		if S.pistolMob or not container then return end
+		local ctrl = container:WaitForChild("Controls", 10)
+		local mob = ctrl and ctrl:WaitForChild("Gui-mob", 5)
+		if not mob then return end
+		S.pistolMob = mob
+		NYB.bind(mob.InputBegan, function(input)
+			if not CFG.PistolSilentAim then return end
+			if input.UserInputType == Enum.UserInputType.Touch
+				or input.UserInputType == Enum.UserInputType.MouseButton1 then
+				S.pistolHeld = true
+			end
+		end)
+		NYB.bind(mob.InputEnded, function(input)
+			if input.UserInputType == Enum.UserInputType.Touch
+				or input.UserInputType == Enum.UserInputType.MouseButton1 then
+				pistolShoot()
+				S.pistolHeld = false
+				pistolHide()
+			end
+		end)
+	end
+
+	NYB.pistolSetupMobile = function()
+		local pg = lp:FindFirstChild("PlayerGui")
+		if not pg then return end
+		local mob = pg:FindFirstChild("Survivor-mob")
+		if mob then task.spawn(NYB.pistolMobileHook, mob) end
+		NYB.bind(pg.ChildAdded, function(c)
+			if c.Name == "Survivor-mob" then task.spawn(NYB.pistolMobileHook, c) end
+		end)
+	end
+	NYB.pistolSetupMobile()
+
+	-- Loop utama: hadapin badan ke target, lock kamera kalau diminta,
+	-- gambar laser. Nggak ngapa-ngapain kalau toggle-nya mati.
+	NYB.bind(RunService.Heartbeat, function()
+		if not NYB.alive then return end
+		if not CFG.PistolSilentAim or not S.pistolHeld then
+			pistolHide()
+			return
+		end
+		local part, _, origin, aim = pistolTarget()
+		if not part or not origin or not aim then
+			pistolHide()
+			return
+		end
+		local char = NYB.char()
+		local hrp = NYB.hrp()
+		if hrp and char and char:GetAttribute("IsCarried") ~= true then
+			pcall(function()
+				hrp.CFrame = CFrame.new(hrp.Position, Vector3.new(aim.X, hrp.Position.Y, aim.Z))
+			end)
+		end
+		if CFG.PistolLockAim then
+			cam.CFrame = cam.CFrame:Lerp(CFrame.lookAt(cam.CFrame.Position, aim), 0.15)
+		end
+		if CFG.PistolLaser then pistolLaser(origin, aim) end
+	end)
+
+	table.insert(NYB.cleanups, function()
+		if S.pistolLaser then
+			pcall(function() S.pistolLaser:Destroy() end)
+			S.pistolLaser = nil
+		end
+		if S.pistolGui then
+			pcall(function() S.pistolGui:Destroy() end)
+			S.pistolGui = nil
+		end
+	end)
+
+	--=========== B. AUTO PARRY (sensor animasi) ===========
+	-- tbl5 Aeris: id animasi serangan killer. Di sini dipakai buat dua versi
+	-- (V1 cocok per-digit, V2 cocok full asset id).
+	local SKILL_ANIMS = {
+		["122812055447896"] = "Veil lunge",
+		["133963973694098"] = "Mayers Basic",
+		["117042998468241"] = "Mayers lunge",
+		["135002183282873"] = "cure lunge",
+		["121216847022485"] = "cure Basic",
+		["132817836308238"] = "Jeff Basic",
+		["129784271201071"] = "Jeff lunge",
+		["82666958311998"]  = "Jeff Frenzy",
+		["78432063483146"]  = "Abyssal Basic",
+		["118907603246885"] = "Abyssal lunge",
+		["139369275981139"] = "Jason Basic",
+		["110355011987939"] = "Jason lunge",
+		["111920872708571"] = "Masked Basic",
+		["105374834496520"] = "Masked lunge",
+		["138720291317243"] = "Masked Tony",
+		["106871536134254"] = "Masked Alex",
+		["130593238885843"] = "Masked Cobra",
+		["115244153053858"] = "Masked Cobra lunge",
+		["74968262036854"]  = "Hidden Basic",
+		["113255068724446"] = "Hidden lunge",
+		["98163597193511"]  = "Hidden S1",
+		["80411309607666"]  = "Abyssal S1",
+	}
+
+	local V2_ATTACK_ANIMS = {
+		["rbxassetid://78432063483146"] = true,
+		["rbxassetid://121216847022485"] = true,
+		["rbxassetid://74968262036854"] = true,
+		["rbxassetid://132817836308238"] = true,
+		["rbxassetid://82666958311998"] = true,
+		["rbxassetid://111920872708571"] = true,
+		["rbxassetid://106871536134254"] = true,
+		["rbxassetid://109402730355822"] = true,
+		["rbxassetid://130593238885843"] = true,
+		["rbxassetid://138720291317243"] = true,
+		["rbxassetid://139369275981139"] = true,
+		["rbxassetid://133963973694098"] = true,
+		["rbxassetid://78935059863801"] = true,
+		["rbxassetid://118907603246885"] = true,
+		["rbxassetid://135002183282873"] = true,
+		["rbxassetid://113255068724446"] = true,
+		["rbxassetid://129784271201071"] = true,
+		["rbxassetid://105374834496520"] = true,
+		["rbxassetid://117070354890871"] = true,
+		["rbxassetid://115244153053858"] = true,
+		["rbxassetid://110355011987939"] = true,
+		["rbxassetid://117042998468241"] = true,
+		["rbxassetid://122812055447896"] = true,
+	}
+
+	local V2_ANIM_SKINS = {
+		Default = "rbxassetid://109133187196613",
+		Shield = "rbxassetid://75939529748815",
+		Robot = "rbxassetid://126894569253341",
+		Katana = "rbxassetid://127096285501517",
+		Fish = "rbxassetid://123307242865945",
+		Watcher = "rbxassetid://81793464499285",
+		Enten = "rbxassetid://127096285501517",
+		BloodShield = "rbxassetid://75939529748815",
+		Feedbacker = "rbxassetid://126894569253341",
+		StopWatch = "rbxassetid://81793464499285",
+	}
+
+	S.parryAttach = S.parryAttach or {}
+	S.parryCD = false
+
+	local function isDowned(char)
+		if not char then return false end
+		return char:GetAttribute("Knocked") == true or char:GetAttribute("IsHooked") == true
+	end
+
+	local function hasDagger()
+		local char = NYB.char()
+		if not char then return false end
+		if char:FindFirstChild("Parrying Dagger") then return true end
+		local pack = lp:FindFirstChild("Backpack")
+		if pack and pack:FindFirstChild("Parrying Dagger") then return true end
+		for _, c in ipairs(char:GetChildren()) do
+			if c.Name == "Parrying Dagger" and (c:IsA("Tool") or c:IsA("Accessory") or c:IsA("Model")) then
+				return true
+			end
+		end
+		return false
+	end
+
+	-- Safety: pas lagi vault/repair/heal/slide/unhook, parry malah bikin
+	-- aksi kita ke-cancel -- jadi kalau mode Safety nyala, tahan dulu.
+	local function safeToParry(char)
+		if not CFG.ParryV1Safety then return true end
+		if not char then return false end
+		local ci = char:FindFirstChild("CheckInterractable")
+		if not ci then return true end
+		for _, a in ipairs({ "isVaulting", "isRepairing", "isUnhooking", "isHealing", "isSliding" }) do
+			if ci:GetAttribute(a) == true then return false end
+		end
+		return true
+	end
+
+	-- Kalau killer lagi menghadap kita (dot look-nya > ambang), parry-nya
+	-- kebaca sama server. di bawah ambang = kemungkinan "parry diem-diem"
+	-- yang nggak dihitung.
+	local function killerFacing(khrp, hrp, threshold)
+		local flat = Vector3.new(khrp.Position.X, 0, khrp.Position.Z)
+			- Vector3.new(hrp.Position.X, 0, hrp.Position.Z)
+		if flat.Magnitude < 0.05 then return true end
+		local look = Vector3.new(khrp.CFrame.LookVector.X, 0, khrp.CFrame.LookVector.Z)
+		if look.Magnitude < 0.05 then return false end
+		return look.Unit:Dot(flat.Unit) >= threshold
+	end
+
+	-- Versi tombol (HP): tap tombol parry di GUI game, biar animasinya juga
+	-- jalan. Fallback ke VirtualInputManager kalau firesignal nggak ada.
+	local function tapParryButton()
+		local pg = lp:FindFirstChild("PlayerGui")
+		local survivorMob = pg and pg:FindFirstChild("Survivor-mob")
+		local guiMob = survivorMob and survivorMob:FindFirstChild("Controls")
+			and survivorMob.Controls:FindFirstChild("Gui-mob")
+		if guiMob and guiMob.Visible and type(firesignal) == "function" then
+			pcall(function()
+				firesignal(guiMob.MouseButton1Down)
+				task.wait(0.01)
+				firesignal(guiMob.MouseButton1Up)
+			end)
+			return true
+		end
+		pcall(function()
+			local loc = UIS:GetMouseLocation()
+			VIM:SendMouseButtonEvent(loc.X, loc.Y, 1, true, game, 0)
+			task.delay(0.05, function()
+				local l2 = UIS:GetMouseLocation()
+				VIM:SendMouseButtonEvent(l2.X, l2.Y, 1, false, game, 0)
+			end)
+		end)
+		return false
+	end
+
+	local function executeParry()
+		if S.parryCD then return end
+		S.parryCD = true
+		S.parryV1Count = (S.parryV1Count or 0) + 1
+		local ok = false
+		if R.parry then
+			for _ = 1, 8 do
+				ok = pcall(function() R.parry:FireServer() end) or ok
+			end
+		end
+		task.spawn(tapParryButton)
+		if not ok then
+			NYB.msg("Remote parry nggak ketemu — pakai jalur tombol HP.")
+		end
+		task.delay(CFG.ParryV1Cooldown, function() S.parryCD = false end)
+	end
+
+	-- Window singkat: begitu animasi serangan main, cek tiap frame sampai
+	-- `seconds` habis. Dipakai pas killer belum menghadap kita.
+	local function parryWindow(char, radius, face, seconds, aggressive)
+		local deadline = tick() + seconds
+		local conn
+
+		local function try()
+			if S.parryCD then return true end
+			local char2 = char
+			if not char2 or not char2.Parent then return true end
+			local my = NYB.char()
+			local hrp = my and my:FindFirstChild("HumanoidRootPart")
+			local khrp = char2:FindFirstChild("HumanoidRootPart")
+			if not hrp or not khrp or not hrp.Parent then return true end
+			if isDowned(my) or not safeToParry(my) then return true end
+			local d = (hrp.Position - khrp.Position).Magnitude
+			if d > radius then return false end
+			if not killerFacing(khrp, hrp, face) then return false end
+			executeParry()
+			return true
+		end
+
+		if try() then return end
+		conn = RunService.Heartbeat:Connect(function()
+			if tick() > deadline or try() then
+				if conn then conn:Disconnect() end
+			end
+		end)
+		table.insert(NYB.cleanups, function()
+			if conn then pcall(function() conn:Disconnect() end) end
+		end)
+	end
+
+	local function parryV1Hit(char, digits)
+		if not SKILL_ANIMS[digits] then return end
+		if S.parryCD then return end
+		if not hasDagger() then return end
+		local my = NYB.char()
+		if not my or isDowned(my) or not safeToParry(my) then return end
+		local hrp = my:FindFirstChild("HumanoidRootPart")
+		local khrp = char:FindFirstChild("HumanoidRootPart")
+		if not hrp or not khrp then return end
+		local dist = (hrp.Position - khrp.Position).Magnitude
+		local face = CFG.ParryV1Face
+		if face < 0.2 then face = 0.35 end
+		if CFG.ParryV1Aggressive then
+			if CFG.ParryV1Radius + 5 < dist then return end
+			-- Aggressive: kejar terus sampai 0.85 detik, radius longgar.
+			parryWindow(char, CFG.ParryV1Radius + 5, face, 0.85, true)
+		else
+			if CFG.ParryV1Radius + 6 < dist then return end
+			parryWindow(char, CFG.ParryV1Radius + 2, face, 0.28, false)
+		end
+	end
+
+	-- V2: cooldown ditentukan server lewat parryResult, jadi HUD-nya ikut
+	-- angka dari server, bukan nebak. Trigger "Remote" = fire parry langsung,
+	-- "Button" = tap tombol game.
+	local function v2CanParry()
+		if not CFG.ParryV2 then return false end
+		if not hasDagger() then return false end
+		if S.v2CD then return false end
+		if S.v2Resolving then return false end
+		if CFG.ParryV2Safety then
+			local my = NYB.char()
+			if not my then return false end
+			if lp:GetAttribute("IsDead") then return false end
+			if my:GetAttribute("IsCarried") or my:GetAttribute("IsHooked") or isDowned(my) then return false end
+			local hrp = my:FindFirstChild("HumanoidRootPart")
+			if hrp and CollectionService:HasTag(hrp, "doing action") then return false end
+			local ci = my:FindFirstChild("CheckInterractable")
+			if ci then
+				for _, a in ipairs({ "isVaulting", "isSliding", "isDroppingPallet", "isRepairing", "isHealing", "isUnhooking", "isExiting" }) do
+					if ci:GetAttribute(a) then return false end
+				end
+			end
+		end
+		return true
+	end
+
+	local function v2HasLOS(char)
+		local my = NYB.char()
+		local hrp = my and my:FindFirstChild("HumanoidRootPart")
+		local khrp = char and char:FindFirstChild("HumanoidRootPart")
+		if not hrp or not khrp then return false end
+		local d = khrp.Position - hrp.Position
+		if d.Magnitude < 0.1 then return true end
+		local p = RaycastParams.new()
+		p.FilterType = Enum.RaycastFilterType.Exclude
+		p.FilterDescendantsInstances = { char, my }
+		return workspace:Raycast(khrp.Position, -d, p) == nil
+	end
+
+	local function v2StartCooldown(seconds)
+		seconds = tonumber(seconds) or 60
+		S.v2CD = true
+		S.v2Token = (S.v2Token or 0) + 1
+		local token = S.v2Token
+		task.delay(seconds, function()
+			if S.v2Token == token then S.v2CD = false end
+		end)
+	end
+
+	local function v2DoParry()
+		if not v2CanParry() then return end
+		S.v2Resolving = true
+		local my = NYB.char()
+		local hrp = my and my:FindFirstChild("HumanoidRootPart")
+		local khrp = nil
+		local best = nil
+		for _, plr in ipairs(Players:GetPlayers()) do
+			if plr ~= lp and NYB.isKiller(plr) and plr.Character then
+				local c = plr.Character:FindFirstChild("HumanoidRootPart")
+				if c and hrp and (not best or (c.Position - hrp.Position).Magnitude < best) then
+					best = (c.Position - hrp.Position).Magnitude
+					khrp = c
+				end
+			end
+		end
+		if CFG.ParryV2Trigger == "Button" then
+			tapParryButton()
+		elseif R.parry then
+			pcall(function() R.parry:FireServer() end)
+		end
+		-- CFrame badan diarahin ke killer: parry cuma sah kalau kita hadap dia.
+		if hrp and khrp then
+			pcall(function()
+				hrp.CFrame = CFrame.lookAt(hrp.Position, Vector3.new(khrp.Position.X, hrp.Position.Y, khrp.Position.Z))
+			end)
+		end
+		local hum = NYB.hum()
+		if hum then pcall(function() hum.AutoRotate = false end) end
+		pcall(function() NYB.playParryAnim() end)
+		if hrp then pcall(function() CollectionService:AddTag(hrp, "doing action") end) end
+		if R.slow then pcall(function() R.slow:Fire(0, 1, 0) end) end
+		-- Server wajib jawab dalam 2 detik; kalau diem, anggap gagal & cooldown.
+		task.delay(2, function()
+			if S.v2Resolving then
+				S.v2Resolving = false
+				v2StartCooldown(CFG.ParryV2Trigger == "Button" and 1.2 or 60)
+				local h = NYB.hrp()
+				if h then pcall(function() CollectionService:RemoveTag(h, "doing action") end) end
+			end
+		end)
+	end
+
+	NYB.parryV2Result = function(good, seconds)
+		if not S.v2Resolving then return end
+		S.v2Resolving = false
+		local n = tonumber(seconds)
+		if n and n > 0 then
+			v2StartCooldown(n)
+		elseif good == true then
+			v2StartCooldown(90)
+		else
+			v2StartCooldown(60)
+		end
+		local h = NYB.hrp()
+		if h then pcall(function() CollectionService:RemoveTag(h, "doing action") end) end
+	end
+	if R.parryResult then
+		NYB.bind(R.parryResult.OnClientEvent, NYB.parryV2Result)
+	end
+
+	local function parryV2Hit(char, assetId)
+		if not CFG.ParryV2 then return end
+		if not V2_ATTACK_ANIMS[assetId] then return end
+		if not v2CanParry() then return end
+		local my = NYB.char()
+		local hrp = my and my:FindFirstChild("HumanoidRootPart")
+		local khrp = char and char:FindFirstChild("HumanoidRootPart")
+		if not hrp or not khrp then return end
+		local dist = (hrp.Position - khrp.Position).Magnitude
+		local radius = CFG.ParryV2Range
+		local face = math.clamp(CFG.ParryV2Face, -1, 1)
+		S.parryV2Count = (S.parryV2Count or 0) + 1
+		local mode = CFG.ParryV2Mode or "Legit"
+
+		if mode == "Aggressive" then
+			if radius + 3 < dist then return end
+			parryWindow(char, radius, face, 1.5, true)
+		else
+			if radius < dist then return end
+			if not v2HasLOS(char) then return end
+			if not killerFacing(khrp, hrp, face) then return end
+			if mode == "Strict" then
+				local look = Vector3.new(cam.CFrame.LookVector.X, 0, cam.CFrame.LookVector.Z)
+				if look.Magnitude < 0.05 then
+					look = Vector3.new(hrp.CFrame.LookVector.X, 0, hrp.CFrame.LookVector.Z)
+				end
+				local flat = Vector3.new(hrp.Position.X, 0, hrp.Position.Z)
+					- Vector3.new(khrp.Position.X, 0, khrp.Position.Z)
+				if look.Magnitude > 0 and flat.Magnitude > 0 and look.Unit:Dot(-flat.Unit) < 0.5 then
+					return
+				end
+			end
+			v2DoParry()
+		end
+	end
+
+	-- Sensor nempel ke karakter killer (Animator.AnimationPlayed), jadi
+	-- trigger-nya presisi di frame animasinya main.
+	local function parrySensor(char)
+		if not char or S.parryAttach[char] then return end
+		S.parryAttach[char] = true
+		task.spawn(function()
+			local hum = char:FindFirstChildOfClass("Humanoid") or char:WaitForChild("Humanoid", 5)
+			if not hum then S.parryAttach[char] = nil return end
+			local anim = hum:FindFirstChildOfClass("Animator") or hum:WaitForChild("Animator", 5)
+			if not anim then S.parryAttach[char] = nil return end
+			NYB.bind(char.AncestryChanged, function(_, parent)
+				if not parent then S.parryAttach[char] = nil end
+			end)
+			NYB.bind(anim.AnimationPlayed, function(track)
+				if not CFG.ParryV1 and not CFG.ParryV2 then return end
+				local id = track.Animation and track.Animation.AnimationId or ""
+				if id == "" then return end
+				if CFG.ParryV1 then
+					local digits = string.match(id, "%d+")
+					if digits then parryV1Hit(char, digits) end
+				end
+				if CFG.ParryV2 then
+					parryV2Hit(char, id)
+				end
+			end)
+		end)
+	end
+
+	local function tryAttach(plr)
+		if plr ~= lp and NYB.isKiller(plr) and plr.Character then
+			parrySensor(plr.Character)
+		end
+	end
+
+	NYB.bind(Players.PlayerAdded, function(plr)
+		NYB.bind(plr.CharacterAdded, function() tryAttach(plr) end)
+		NYB.bind(plr:GetPropertyChangedSignal("Team"), function() tryAttach(plr) end)
+		tryAttach(plr)
+	end)
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if plr ~= lp then
+			NYB.bind(plr.CharacterAdded, function() tryAttach(plr) end)
+			NYB.bind(plr:GetPropertyChangedSignal("Team"), function() tryAttach(plr) end)
+			tryAttach(plr)
+		end
+	end
+	NYB.bind(lp.CharacterAdded, function()
+		S.parryCD = false
+		S.v2Resolving = false
+		S.parryAttach = {}
+		for _, plr in ipairs(Players:GetPlayers()) do
+			if plr ~= lp then tryAttach(plr) end
+		end
+	end)
+
+	-- Lingkaran radius parry (V1 & V2 pakai adornment yang sama; yang
+	-- menentukan cuma toggle + nilai radiusnya).
+	local circle = Instance.new("CylinderHandleAdornment")
+	circle.Name = "NYB_ParryRange"
+	circle.Radius = CFG.ParryV2Range
+	circle.InnerRadius = math.max(0.1, CFG.ParryV2Range - 0.15)
+	circle.Height = 0.01
+	circle.Color3 = Color3.fromRGB(80, 80, 80)
+	circle.AlwaysOnTop = false
+	circle.Transparency = 1
+	circle.Adornee = workspace:FindFirstChildOfClass("Terrain")
+	pcall(function() circle.Parent = guiHost() end)
+	if not circle.Parent then
+		pcall(function() circle.Parent = lp:WaitForChild("PlayerGui") end)
+	end
+	S.parryCircle = circle
+
+	local rayParams = RaycastParams.new()
+	rayParams.FilterType = Enum.RaycastFilterType.Exclude
+
+	NYB.bind(RunService.Heartbeat, function()
+		if not NYB.alive then return end
+		-- Angka tally cuma ditulis kalau berubah: label di-render ulang tiap
+		-- frame itu mahal, tapi nunggu 1 detik bikin angkanya kelihatan telat.
+		local c1, c2 = S.parryV1Count or 0, S.parryV2Count or 0
+		if S.parryShown1 ~= c1 or S.parryShown2 ~= c2 then
+			S.parryShown1, S.parryShown2 = c1, c2
+			local lbl = NYB.parryLbl
+			if lbl then
+				lbl.Text = string.format("Parry terkirim: V1 %dx / V2 %dx", c1, c2)
+			end
+		end
+		local wantV1 = CFG.ParryV1 and CFG.ParryV1Circle
+		local wantV2 = CFG.ParryV2 and CFG.ParryV2Circle
+		local radius = wantV2 and CFG.ParryV2Range or CFG.ParryV1Radius
+		if not (wantV1 or wantV2) then
+			if circle.Transparency ~= 1 then circle.Transparency = 1 end
+			return
+		end
+		local hrp = NYB.hrp()
+		if not hrp then
+			if circle.Transparency ~= 1 then circle.Transparency = 1 end
+			return
+		end
+		if S.circleRoot == hrp and S.circleRadius == radius then return end
+		S.circleRoot = hrp
+		S.circleRadius = radius
+		circle.Transparency = 0.4
+		circle.Radius = radius
+		circle.InnerRadius = math.max(0.1, radius - 0.15)
+		rayParams.FilterDescendantsInstances = { lp.Character }
+		local hit = workspace:Raycast(hrp.Position, Vector3.new(0, -15, 0), rayParams)
+		local pos = hit and hit.Position or (hrp.Position - Vector3.new(0, 3, 0))
+		circle.CFrame = CFrame.new(pos + Vector3.new(0, 0.05, 0)) * CFrame.Angles(math.pi / 2, 0, 0)
+	end)
+
+	table.insert(NYB.cleanups, function()
+		if S.parryCircle then
+			pcall(function() S.parryCircle:Destroy() end)
+			S.parryCircle = nil
+		end
+	end)
+
+	-- Animasi parry lokal (opsional, cuma kosmetik): dipakai V2 kalau
+	-- animasinya ketemu. Gagal = diem, nggak nge-block parry-nya.
+	NYB.playParryAnim = function()
+		local hum = NYB.hum()
+		local animator = hum and hum:FindFirstChildOfClass("Animator")
+		if not animator then return end
+		if S.parryTrack then pcall(function() S.parryTrack:Stop(0.05) end) end
+		local id = V2_ANIM_SKINS.Default
+		local char = NYB.char()
+		local dagger = char and char:FindFirstChild("Parrying Dagger")
+		if dagger then
+			for _, d in ipairs(dagger:GetDescendants()) do
+				if d:IsA("StringValue") then
+					local key = tostring(d.Value)
+					if V2_ANIM_SKINS[key] then id = V2_ANIM_SKINS[key] break end
+				end
+			end
+		end
+		pcall(function()
+			local a = Instance.new("Animation")
+			a.AnimationId = id
+			S.parryTrack = animator:LoadAnimation(a)
+			S.parryTrack.Priority = Enum.AnimationPriority.Action4
+			S.parryTrack:Play()
+		end)
+	end
+
+	--=========== C. AUTO DROP PALLET ===========
+	-- Jalan tiap 0.3 detik: kalau ada killer dalam jarak X dan ada pallet
+	-- dalam jarak X juga, palletnya dilempar ke server. Pallet yang udah
+	-- dipakai dicatat biar nggak spam remote yang sama.
+	local function palletSafety(char)
+		if not CFG.AutoPalletSafety then return true end
+		if not char then return false end
+		if char:GetAttribute("Knocked") == true or char:GetAttribute("IsCarried") == true
+			or char:GetAttribute("IsHooked") == true then
+			return false
+		end
+		local ci = char:FindFirstChild("CheckInterractable")
+		if ci then
+			for _, a in ipairs({ "isVaulting", "isRepairing", "isUnhooking", "isHealing", "isSliding", "isCarrying" }) do
+				if ci:GetAttribute(a) == true then return false end
+			end
+		end
+		local hum = char:FindFirstChildOfClass("Humanoid")
+		if hum and hum.Health <= 0 then return false end
+		return true
+	end
+
+	local function nearestKillerHRP()
+		local hrp = NYB.hrp()
+		if not hrp then return nil end
+		local best, bd = nil, math.huge
+		for _, plr in ipairs(Players:GetPlayers()) do
+			if plr ~= lp and NYB.isKiller(plr) and plr.Character then
+				local c = plr.Character:FindFirstChild("HumanoidRootPart")
+				if c then
+					local d = (c.Position - hrp.Position).Magnitude
+					if d < bd then bd = d; best = c end
+				end
+			end
+		end
+		return best
+	end
+
+	local function nearestPallet(hrp)
+		local C = NYB.cache
+		local list = (C and C.palletList) or {}
+		if #list == 0 then return nil end
+		local best, bd = nil, CFG.AutoPalletDist
+		for _, m in ipairs(list) do
+			if m and m.Parent and not S.palletUsed[m] then
+				local pt = m:FindFirstChild("PalletPointSlide", true)
+					or m:FindFirstChild("PalletPoint", true)
+					or m:FindFirstChild("PrimaryPartPallet", true)
+				if pt then
+					local ok, pos = pcall(function() return pt.Position end)
+					if ok and pos then
+						local d = (hrp.Position - pos).Magnitude
+						if d < bd then bd = d; best = m end
+					end
+				end
+			end
+		end
+		return best
+	end
+
+	NYB.autoPalletStep = function()
+		if not CFG.AutoPallet then return end
+		if NYB.role(lp) ~= "Survivor" then return end
+		if tick() - (S.palletLast or 0) < CFG.AutoPalletCooldown then return end
+		local char = NYB.char()
+		local hrp = char and char:FindFirstChild("HumanoidRootPart")
+		if not hrp then return end
+		if not palletSafety(char) then return end
+		local khrp = nearestKillerHRP()
+		if not khrp then return end
+		if (khrp.Position - hrp.Position).Magnitude > CFG.AutoPalletDist then return end
+		local pallet = nearestPallet(hrp)
+		if not pallet then return end
+		local pt = pallet:FindFirstChild("PalletPointSlide", true)
+			or pallet:FindFirstChild("PalletPoint", true)
+			or pallet:FindFirstChild("PrimaryPartPallet", true)
+		if not pt then return end
+		if R.palletDrop then
+			pcall(function() R.palletDrop:FireServer(pt) end)
+		end
+		S.palletUsed = S.palletUsed or {}
+		S.palletUsed[pallet] = true
+		S.palletLast = tick()
+	end
+
+	-- Loop sendiri: pakai task.spawn + NYB.alive biar mati saat Unload.
+	task.spawn(function()
+		while NYB.alive do
+			task.wait(0.3)
+			if CFG.AutoPallet then
+				pcall(NYB.autoPalletStep)
+			end
+		end
+	end)
+
+	NYB.autoPalletToggle = function(on)
+		CFG.AutoPallet = on
+		S.palletUsed = {}
+		S.palletLast = 0
+		if on and NYB.role(lp) ~= "Survivor" then
+			NYB.msg("Auto Drop Pallet: kamu harus Survivor — toggle dibiarkan nyala.")
+		end
+	end
+
+	NYB.pistolApply = function(on)
+		CFG.PistolSilentAim = on
+		NYB.pistolSelector(on)
+		if not on then
+			S.pistolHeld = false
+			pistolHide()
+		end
+	end
+end
+
 --===================== [ 13. UI BUILD ] ===================================
 do
 	local U = NYB.ui
@@ -6867,6 +8014,22 @@ do
 	U.slider(T.aim.page, "Spear Gravity", 10, 300, CFG.SpearGravity, 1, function(v) CFG.SpearGravity = v end)
 	U.slider(T.aim.page, "Spear Max Dist", 50, 2000, CFG.SpearMaxDist, 0, function(v) CFG.SpearMaxDist = v end)
 	U.slider(T.aim.page, "Spear Lead", 0, 3, CFG.SpearLead, 2, function(v) CFG.SpearLead = v end)
+	U.section(T.aim.page, "Silent Aim Pistol (Twist of Fate)")
+	U.toggle(T.aim.page, "Silent Aim (pistol)", "PistolSilentAim", function(v) NYB.pistolApply(v) end)
+	U.dropdown(T.aim.page, "Target Mode", { "Killer", "Survivors", "Zombie" }, "Killer", "PistolTarget", function(v) CFG.PistolTarget = v end)
+	U.toggle(T.aim.page, "Predict Aim (ToF)", "PistolPredict", function(v) CFG.PistolPredict = v end)
+	U.slider(T.aim.page, "Prediction Efficiency", 0.1, 1.2, CFG.PistolPredEff, 2, function(v) CFG.PistolPredEff = v end)
+	U.slider(T.aim.page, "Prediction Smooth", 0.05, 1, CFG.PistolPredSmooth, 2, function(v) CFG.PistolPredSmooth = v end)
+	U.slider(T.aim.page, "Bullet Speed (stud/s)", 100, 1200, CFG.PistolSpeed, 0, function(v) CFG.PistolSpeed = v end)
+	U.toggle(T.aim.page, "Lock Aim ke Target", "PistolLockAim", function(v) CFG.PistolLockAim = v end)
+	U.toggle(T.aim.page, "Wallcheck", "PistolWallcheck", function(v) CFG.PistolWallcheck = v end)
+	U.toggle(T.aim.page, "Nembak Mandek Saat Knocked", "PistolBlockKnocked", function(v) CFG.PistolBlockKnocked = v end)
+	U.toggle(T.aim.page, "Laser Effect", "PistolLaser", function(v) CFG.PistolLaser = v end)
+	U.toggle(T.aim.page, "Block Peluru (TOF)", "PistolBlockBullet", function(v)
+		CFG.PistolBlockBullet = v
+		if v then NYB.installPistolHook() end
+	end)
+	U.label(T.aim.page, "Pistol: tahan klik kanan buat kunci, klik kiri buat tembak. Hotkey K/J/L ganti mode.", NYB.ui.colors.dim)
 	U.button(T.aim.page, "Crosshair ON/OFF", function()
 		NYB.setCfg("Crosshair", not CFG.Crosshair)
 		NYB.buildCrosshair()
@@ -6991,6 +8154,32 @@ do
 	U.button(T.auto.page, "Mask GUI (buka/tutup)", function() NYB.maskGui(true) end)
 	U.button(T.auto.page, "Mask GUI (tutup)", function() NYB.maskGui(false) end)
 	U.button(T.auto.page, "Instant Escape", NYB.instantEscape)
+
+	U.section(T.auto.page, "Auto Parry Sensor (V1)")
+	U.toggle(T.auto.page, "Auto Parry V1 (sensor animasi killer)", "ParryV1", function(v) CFG.ParryV1 = v end)
+	U.toggle(T.auto.page, "Safety Parry (V1)", "ParryV1Safety", function(v) CFG.ParryV1Safety = v end)
+	U.toggle(T.auto.page, "Aggressive Mode (V1)", "ParryV1Aggressive", function(v) CFG.ParryV1Aggressive = v end)
+	U.toggle(T.auto.page, "Show Range Circle (V1)", "ParryV1Circle", function(v) CFG.ParryV1Circle = v end)
+	U.slider(T.auto.page, "Parry Radius (V1)", 5, 25, CFG.ParryV1Radius, 0, function(v) CFG.ParryV1Radius = v end)
+	U.slider(T.auto.page, "Face Sensitivity (V1)", -10, 10, 7, 0, function(v) CFG.ParryV1Face = v / 10 end)
+	U.slider(T.auto.page, "Parry Cooldown (V1 detik)", 0.1, 5, CFG.ParryV1Cooldown, 1, function(v) CFG.ParryV1Cooldown = v end)
+
+	U.section(T.auto.page, "Auto Parry V2 (cooldown server)")
+	U.toggle(T.auto.page, "Auto Parry V2", "ParryV2", function(v) CFG.ParryV2 = v end)
+	U.toggle(T.auto.page, "Safety Parry (V2)", "ParryV2Safety", function(v) CFG.ParryV2Safety = v end)
+	U.dropdown(T.auto.page, "Mode (V2)", { "Legit", "Strict", "Aggressive" }, "Legit", "ParryV2Mode", function(v) CFG.ParryV2Mode = v end)
+	U.dropdown(T.auto.page, "Trigger (V2)", { "Remote", "Button" }, "Remote", "ParryV2Trigger", function(v) CFG.ParryV2Trigger = v end)
+	U.slider(T.auto.page, "Killer Face (V2)", -1, 1, CFG.ParryV2Face, 1, function(v) CFG.ParryV2Face = v end)
+	U.toggle(T.auto.page, "Show Range Circle (V2)", "ParryV2Circle", function(v) CFG.ParryV2Circle = v end)
+	U.slider(T.auto.page, "Parry Radius (V2)", 2, 20, CFG.ParryV2Range, 1, function(v) CFG.ParryV2Range = v end)
+	local parryTally = U.label(T.auto.page, "Parry terkirim: V1 0x / V2 0x")
+	NYB.parryLbl = parryTally
+
+	U.section(T.auto.page, "Auto Drop Pallet")
+	U.toggle(T.auto.page, "Auto Drop Pallet (killer deket)", "AutoPallet", function(v) NYB.autoPalletToggle(v) end)
+	U.toggle(T.auto.page, "Safety (pallet)", "AutoPalletSafety", function(v) CFG.AutoPalletSafety = v end)
+	U.slider(T.auto.page, "Trigger Distance", 5, 30, CFG.AutoPalletDist, 0, function(v) CFG.AutoPalletDist = v end)
+	U.slider(T.auto.page, "Pallet Cooldown (detik)", 0.5, 10, CFG.AutoPalletCooldown, 1, function(v) CFG.AutoPalletCooldown = v end)
 
 	U.section(T.auto.page, "Status Generator")
 	local genStatus = U.label(T.auto.page, "tekan Scan Ulang Map")
