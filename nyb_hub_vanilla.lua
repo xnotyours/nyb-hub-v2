@@ -342,6 +342,12 @@ local CFG = {
 	AutoPalletSafety  = false,
 	AutoPalletDist    = 10,
 	AutoPalletCooldown= 2.5,
+	-- ==== PORT GRUP 5 (Survivor ability + Anti Looping) ====
+	AutoCrouch        = false,
+	AutoCrouchDist    = 40,
+	AntiSlowVault     = false,
+	AntiLoopVault     = false,
+	AntiLoopInterval  = 0.5,
 	FakeName       = "NYB HUB",
 }
 
@@ -7861,6 +7867,249 @@ do
 	end
 end
 
+--===================== [ 11f. PORT AERIS: GRUP 5 ] ========================
+-- Port ADITIF dari source Aeris: Auto Crouch / Dodge S1 (baris 3138-3166 +
+-- sensor 3490-3512), Anti Slow Vault (Surv_PerfectVault, 11520-11570), dan
+-- Anti Looping "Block Vault & Pallets" (16438-16536).
+--
+-- Yang sudah ada di NYB dan SENGAJA dilewati (biar nggak dobel):
+--   No Fall Damage  -> CFG.AntiFall (remote fall yang sama, arg[1]=0)
+--   Bypass Exit Gate-> CFG.BypassGate
+--   Self Heal       -> NYB.autoHeal (R.heal:FireServer(hrp, true), remote sama)
+--   Unlimited Vault -> CFG.UnlimitedVault (buang tag "Blocked")
+-- Key baru: AutoCrouch*, AntiSlowVault, AntiLoopVault. Semua default OFF.
+do
+	local Players = game:GetService("Players")
+	local lp = Players.LocalPlayer
+	local UIS = game:GetService("UserInputService")
+	local RunService = game:GetService("RunService")
+	local RS = game:GetService("ReplicatedStorage")
+	local VIM = game:GetService("VirtualInputManager")
+	local R = NYB.remotes
+	local C = NYB.cache
+	local S = NYB.state
+
+	S.crouchAttach = S.crouchAttach or {}
+
+	local function isDowned(char)
+		if not char then return false end
+		return char:GetAttribute("Knocked") == true or char:GetAttribute("IsHooked") == true
+	end
+
+	--=========== A. AUTO CROUCH (DODGE S1) ===========
+	-- Killer yang main animasi S1 (Abyssal, id 80411309607666) = bakal nyerang.
+	-- Yang kita lakuin: tekan crouch, sama kayak pemain nunduk buat dodge.
+	-- Di HP kita tap tombol crouch di GUI game (biar animasinya jalan juga),
+	-- di PC pakai VirtualInputManager.
+	local function triggerCrouch()
+		pcall(function()
+			local node = lp:FindFirstChild("PlayerGui")
+			for part in string.gmatch("Survivor-mob.Controls.crouch.icon", "[^%.]+") do
+				if node then node = node:FindFirstChild(part) end
+			end
+
+			if node and node:IsA("GuiObject") and node.Visible
+				and node.Parent and node.Parent:IsA("GuiButton") then
+				local btn = node.Parent
+				if UIS.TouchEnabled and type(firesignal) == "function" then
+					firesignal(btn.MouseButton1Click)
+					task.wait(1.4)
+					firesignal(btn.MouseButton1Click)
+					return
+				end
+			end
+
+			VIM:SendKeyEvent(true, Enum.KeyCode.LeftControl, false, game)
+			task.wait(1.4)
+			VIM:SendKeyEvent(false, Enum.KeyCode.LeftControl, false, game)
+		end)
+	end
+
+	local function crouchSensor(char)
+		if not char or S.crouchAttach[char] then return end
+		S.crouchAttach[char] = true
+		task.spawn(function()
+			local hum = char:FindFirstChildOfClass("Humanoid") or char:WaitForChild("Humanoid", 5)
+			if not hum then S.crouchAttach[char] = nil return end
+			local anim = hum:FindFirstChildOfClass("Animator") or hum:WaitForChild("Animator", 5)
+			if not anim then S.crouchAttach[char] = nil return end
+			NYB.bind(char.AncestryChanged, function(_, parent)
+				if not parent then S.crouchAttach[char] = nil end
+			end)
+			NYB.bind(anim.AnimationPlayed, function(track)
+				if not CFG.AutoCrouch then return end
+				local id = track.Animation and track.Animation.AnimationId or ""
+				local digits = string.match(id, "%d+")
+				if digits ~= "80411309607666" then return end
+				local my = NYB.char()
+				if not my or isDowned(my) then return end
+				local hrp = my:FindFirstChild("HumanoidRootPart")
+				local khrp = char:FindFirstChild("HumanoidRootPart")
+				if not hrp or not khrp then return end
+				if (hrp.Position - khrp.Position).Magnitude > CFG.AutoCrouchDist then return end
+				S.crouchCount = (S.crouchCount or 0) + 1
+				task.spawn(triggerCrouch)
+			end)
+		end)
+	end
+
+	local function tryAttach(plr)
+		if plr ~= lp and NYB.isKiller(plr) and plr.Character then
+			crouchSensor(plr.Character)
+		end
+	end
+
+	NYB.bind(Players.PlayerAdded, function(plr)
+		NYB.bind(plr.CharacterAdded, function() tryAttach(plr) end)
+		NYB.bind(plr:GetPropertyChangedSignal("Team"), function() tryAttach(plr) end)
+		tryAttach(plr)
+	end)
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if plr ~= lp then
+			NYB.bind(plr.CharacterAdded, function() tryAttach(plr) end)
+			NYB.bind(plr:GetPropertyChangedSignal("Team"), function() tryAttach(plr) end)
+			tryAttach(plr)
+		end
+	end
+	NYB.bind(lp.CharacterAdded, function()
+		S.crouchAttach = {}
+		for _, plr in ipairs(Players:GetPlayers()) do
+			if plr ~= lp then tryAttach(plr) end
+		end
+	end)
+
+	--=========== B. ANTI SLOW VAULT ===========
+	-- Vault "kotor" bikin kita melambat karena game ngitung animasi vault
+	-- nggak lurus. Kita timpa dua method controller-nya: paksa lolos terus
+	-- dan set speed karakter 20 (nilai lari penuh).
+	local vaultHooked = false
+
+	NYB.antiSlowVault = function(on)
+		if not on then
+			-- Hook-nya nggak bisa dilepas tanpa nyimpen fungsi aslinya di
+			-- tempat yang sama kayak Aeris; cukup matiin efeknya lewat CFG
+			-- (method yang kita pasang ngecek CFG tiap panggilan).
+			NYB.msg("Anti Slow Vault: efek dimatikan (hook tetap nempel, cek CFG saat dipanggil).")
+			return
+		end
+		if vaultHooked then return end
+		local ok = pcall(function()
+			task.spawn(function()
+				local mod
+				for _ = 1, 10 do
+					local r = pcall(function()
+						local modules = RS:WaitForChild("Modules", 5)
+						local survivors = modules and modules:WaitForChild("Survivors", 5)
+						local ctrl = survivors and survivors:WaitForChild("SurvivorAnimationsController", 5)
+						if not ctrl then return nil end
+						return require(ctrl)
+					end)
+					if r and type(r) == "table" then mod = r break end
+					task.wait(1)
+				end
+				if not mod then return end
+				local origFace = mod._isFacingStraightEnough
+				local origAnim = mod._onVaultAnimation
+				if type(origFace) == "function" then
+					mod._isFacingStraightEnough = function(arg, a2, a3, a4)
+						if not CFG.AntiSlowVault then return origFace(arg, a2, a3, a4) end
+						if arg then arg.characterspeed = 20 end
+						return true, 0
+					end
+				end
+				if type(origAnim) == "function" then
+					mod._onVaultAnimation = function(arg, a2, a3)
+						if not CFG.AntiSlowVault then return origAnim(arg, a2, a3) end
+						return origAnim(arg, a2, true)
+					end
+				end
+				vaultHooked = true
+				NYB.msg("Anti Slow Vault: SurvivorAnimationsController ke-hook.")
+			end)
+		end)
+		if not ok then NYB.msg("Anti Slow Vault: require() nggak didukung executor ini.") end
+	end
+
+	--=========== C. ANTI LOOPING (BLOCK VAULT & PALLETS) ===========
+	-- Semua titik vault/pallet di map ditandai "in use" ke server, jadi
+	-- killer (dan kita) nggak bisa muter-muter vault/pallet yang sama.
+	-- Matiin = kirim event Complete dengan false, server balikin statusnya.
+	local loopConns = {}
+
+	local function clearLoopConns()
+		for _, c in ipairs(loopConns) do
+			pcall(function() c:Disconnect() end)
+		end
+		loopConns = {}
+	end
+
+	local function loopApply(on)
+		local map = workspace:FindFirstChild("Map")
+		if not map then NYB.msg("Map tidak ketemu — Anti Looping nunggu map.") return end
+
+		if not on then
+			clearLoopConns()
+			for _, d in ipairs(map:GetDescendants()) do
+				if d.Name == "VaultPointInUse" and R.vaultDone then
+					pcall(function() R.vaultDone:FireServer(d.Parent, false) end)
+				elseif d.Name == "PalletPointSlideInUse" and R.palletDone then
+					pcall(function() R.palletDone:FireServer(d.Parent, false) end)
+				end
+			end
+			return
+		end
+
+		for _, d in ipairs(map:GetDescendants()) do
+			if d.Name == "VaultTrigger" and R.vault then
+				pcall(function() R.vault:FireServer(d, true) end)
+			elseif d.Name == "PalletPointSlide" and d:IsA("BasePart") and R.palletSlide then
+				pcall(function() R.palletSlide:FireServer(d, true) end)
+			end
+		end
+
+		-- Pallet yang baru "turun" ganti nama jadi PalletPointSlide; itu
+		-- titik yang paling sering dipakai buat looping, jadi diawasi.
+		local function watch(part)
+			if not (part:IsA("BasePart") and part.Name == "PalletPoint") then return end
+			local conn = part:GetPropertyChangedSignal("Name"):Connect(function()
+				if not CFG.AntiLoopVault then return end
+				if part.Name == "PalletPointSlide" and R.palletSlide then
+					task.wait(0.1)
+					pcall(function() R.palletSlide:FireServer(part, true) end)
+				end
+			end)
+			table.insert(loopConns, conn)
+		end
+
+		for _, d in ipairs(map:GetDescendants()) do watch(d) end
+		table.insert(loopConns, map.DescendantAdded:Connect(watch))
+	end
+
+	NYB.blockVaultToggle = function(on)
+		CFG.AntiLoopVault = on
+		pcall(function() loopApply(on) end)
+		if on then NYB.msg("Anti Looping ON — vault/pallet di map dikunci.") end
+	end
+
+	table.insert(NYB.cleanups, function()
+		clearLoopConns()
+		if CFG.AntiLoopVault then pcall(function() loopApply(false) end) end
+	end)
+
+	--=========== D. TALLY AUTO CROUCH ===========
+	-- Angka ini yang bikin Auto Crouch bisa dibuktiin jalan (di game maupun
+	-- di harness), bukan cuma "toggle-nya nyala".
+	NYB.bind(RunService.Heartbeat, function()
+		if not NYB.alive then return end
+		local n = S.crouchCount or 0
+		if S.crouchShown ~= n then
+			S.crouchShown = n
+			local lbl = NYB.crouchLbl
+			if lbl then lbl.Text = string.format("Auto Crouch trigger: %dx", n) end
+		end
+	end)
+end
+
 --===================== [ 13. UI BUILD ] ===================================
 do
 	local U = NYB.ui
@@ -8174,6 +8423,19 @@ do
 	U.slider(T.auto.page, "Parry Radius (V2)", 2, 20, CFG.ParryV2Range, 1, function(v) CFG.ParryV2Range = v end)
 	local parryTally = U.label(T.auto.page, "Parry terkirim: V1 0x / V2 0x")
 	NYB.parryLbl = parryTally
+
+	U.section(T.auto.page, "Survivor Ability (port Aeris)")
+	U.toggle(T.auto.page, "Auto Crouch (Dodge S1)", "AutoCrouch", function(v) CFG.AutoCrouch = v end)
+	U.slider(T.auto.page, "Auto Crouch Jarak", 10, 80, CFG.AutoCrouchDist, 0, function(v) CFG.AutoCrouchDist = v end)
+	U.toggle(T.auto.page, "Anti Slow Vault", "AntiSlowVault", function(v) NYB.antiSlowVault(v) end)
+	U.label(T.auto.page, "Anti Slow Vault: nge-hook SurvivorAnimationsController. Butuh executor yang dukung require().", NYB.ui.colors.dim)
+
+	U.section(T.auto.page, "Anti Looping (kunci vault & pallet)")
+	U.toggle(T.auto.page, "Block Vault & Pallets (map)", "AntiLoopVault", function(v) NYB.blockVaultToggle(v) end)
+	U.slider(T.auto.page, "Anti Loop Interval (detik)", 0.2, 3, CFG.AntiLoopInterval, 1, function(v) CFG.AntiLoopInterval = v end)
+	U.label(T.auto.page, "Nyalain = semua VaultTrigger/PalletSlide di map dikirim 'in use' biar killer nggak bisa looping. Matiin = dibalikin.", NYB.ui.colors.dim)
+	local crouchTally = U.label(T.auto.page, "Auto Crouch trigger: 0x")
+	NYB.crouchLbl = crouchTally
 
 	U.section(T.auto.page, "Auto Drop Pallet")
 	U.toggle(T.auto.page, "Auto Drop Pallet (killer deket)", "AutoPallet", function(v) NYB.autoPalletToggle(v) end)
