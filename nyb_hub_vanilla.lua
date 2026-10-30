@@ -125,6 +125,21 @@ local CFG = {
 	Accent         = Color3.fromRGB(0, 210, 190),
 	UIScaleAuto    = true,
 	UIScale        = 0.9,
+	-- Kamera (port Aeris)
+	ThirdPerson    = false,
+	InfinityZoom   = false,
+	DBDCamera      = false,
+	DBDDistance    = 13,
+	DBDHeight      = 4.2,
+	DBDRunSmooth   = 0.1,
+	DBDLookSmooth  = 0.28,
+	DBDSens        = 0.55,
+	DBDPitchMin    = -0.55,
+	DBDPitchMax    = 0.45,
+	DBDFOV         = 70,
+	-- Performa (port Aeris)
+	NoShadow       = false,
+	RemoveTexture  = false,
 	-- ESP
 	EspPlayers     = false,
 	EspChams       = false,
@@ -3023,7 +3038,7 @@ NYB.ui.toggle = function(page, text, key, callback)
 		warn("[NYB HUB] toggle '" .. tostring(text) .. "': section tidak ada")
 		return nil
 	end
-	local default = (type(key) == "string") and (CFG[key] and true or false) or (key and true or false)
+	local default = (type(key) == "string") and (CFG[key] == true) or (key == true)
 	local ok, el = pcall(function()
 		return sec:AddToggle(tostring(text), default, function(state)
 			if type(key) == "string" then CFG[key] = state end
@@ -5671,6 +5686,376 @@ do
 	end
 end
 
+--===================== [ 11b. PORT AERIS: CAMERA + PERFORMA ] ==============
+-- Port ADITIF dari source Aeris Hub (baris 10971-11424, 13152-13395,
+-- 16697-16804). Nol fitur lama diubah: Stretch Res, Camera FOV, Fullbright,
+-- No Fog, Zoom Unlock tetap apa adanya -- blok ini cuma NAMBAH.
+--
+-- Semua yang perlu diakses dari luar nempel di NYB.* karena local di dalam
+-- `do` block nggak kelihatan dari blok lain.
+do
+	--==== NO SHADOW ====
+	-- applyVisual() punya snapshot lighting sendiri dan nulis GlobalShadows.
+	-- Kita simpan snapshot terpisah biar bisa balikin nilai asli tanpa nebak,
+	-- dan No Shadow selalu menang saat Fullbright nyala (dua-duanya matiin shadow).
+	local origShadows = Lighting.GlobalShadows
+
+	NYB.applyPerf = function()
+		pcall(function()
+			-- CATATAN: jangan ditulis `(a or b) and false or c`. Di Lua, kalau
+			-- `(a or b)` true maka `true and false` = false, lalu `false or c`
+			-- balik ke c -- jadi No Shadow nggak pernah ngefek.
+			if CFG.NoShadow or CFG.Fullbright then
+				Lighting.GlobalShadows = false
+			else
+				Lighting.GlobalShadows = origShadows
+			end
+		end)
+	end
+
+	-- Aeris nge-guard Lighting lewat Heartbeat karena game nulis ulang nilai itu
+	-- sendiri tiap round/atmosphere baru. Kita pakai pola yang sama, dan
+	-- applyVisual() ikut dipanggil biar dua-duanya nggak rebutan urutan.
+	local lastGuard = 0
+	NYB.bind(RunService.Heartbeat, function()
+		if not (CFG.NoShadow or CFG.Fullbright or CFG.NoFog) then return end
+		local now = tick()
+		if now - lastGuard < 0.4 then return end
+		lastGuard = now
+		NYB.applyVisual()
+		NYB.applyPerf()
+	end)
+
+	--==== THIRD PERSON (KILLER) ====
+	-- Port fn52 + fn51 + Set/ResetWorldTransparency dari Aeris.
+	local TP_BODY = {
+		LeftHand = true, RightHand = true, LeftLowerArm = true, RightLowerArm = true,
+		LeftUpperArm = true, RightUpperArm = true,
+	}
+
+	local function walkParts(root, fn)
+		if not root then return end
+		pcall(function()
+			if root:IsA("BasePart") or root:IsA("Decal") then fn(root) end
+			for _, d in ipairs(root:GetDescendants()) do
+				if d:IsA("BasePart") or d:IsA("Decal") then fn(d) end
+			end
+		end)
+	end
+
+	-- Di VD, badan karakter kita nempel sebagai anak kamera. Kalau nggak dibikin
+	-- transparan, kamera orang ketiga malah ngeliat isi kepala sendiri.
+	local function worldTransparency(v)
+		if not cam then return end
+		for _, ch in ipairs(cam:GetChildren()) do
+			if ch ~= lp.Character then
+				walkParts(ch, function(d)
+					pcall(function()
+						d.LocalTransparencyModifier = v
+						d.Transparency = v
+					end)
+				end)
+			end
+		end
+	end
+
+	local function characterTransparency(v)
+		local char = lp.Character
+		if not char then return end
+		for _, ch in ipairs(char:GetChildren()) do
+			if ch.Name == "Hat" or (ch:IsA("BasePart") and TP_BODY[ch.Name]) or ch:IsA("Tool") then
+				walkParts(ch, function(d)
+					pcall(function()
+						d.LocalTransparencyModifier = v
+						d.Transparency = v
+					end)
+				end)
+			end
+		end
+	end
+
+	local function thirdPersonReset()
+		pcall(function()
+			lp.CameraMode = Enum.CameraMode.Classic
+			if CFG.InfinityZoom then
+				lp.CameraMinZoomDistance = 0
+				lp.CameraMaxZoomDistance = math.huge
+			else
+				lp.CameraMinZoomDistance = 0.5
+				lp.CameraMaxZoomDistance = 128
+			end
+		end)
+		worldTransparency(0)
+		characterTransparency(0)
+	end
+
+	local tpConn = nil
+	local function thirdPersonOff()
+		if tpConn then tpConn:Disconnect() tpConn = nil end
+		thirdPersonReset()
+	end
+
+	NYB.thirdPerson = function(on)
+		if on and not NYB.isKiller(lp) then
+			-- Aeris nolak fitur ini kalau bukan Killer; ikut, tapi kasih pesan
+			-- yang kelihatan (warn() sering nggak tampil di executor HP).
+			CFG.ThirdPerson = false
+			if NYB.ui.reg.ThirdPerson then NYB.ui.reg.ThirdPerson.set(false) end
+			NYB.msg("Third Person cuma buat Killer.")
+			return
+		end
+
+		if tpConn then tpConn:Disconnect() tpConn = nil end
+		if not on then thirdPersonReset() return end
+
+		pcall(function()
+			lp.CameraMode = Enum.CameraMode.Classic
+			lp.CameraMinZoomDistance = 7
+			lp.CameraMaxZoomDistance = 128
+		end)
+		worldTransparency(1)
+
+		tpConn = RunService.RenderStepped:Connect(function()
+			if not CFG.ThirdPerson then return end
+			if not NYB.isKiller(lp) then
+				-- keluar dari role Killer (mis. round selesai) -> matiin sendiri
+				CFG.ThirdPerson = false
+				if NYB.ui.reg.ThirdPerson then NYB.ui.reg.ThirdPerson.set(false) end
+				thirdPersonReset()
+				return
+			end
+			pcall(function()
+				lp.CameraMode = Enum.CameraMode.Classic
+				lp.CameraMinZoomDistance = 7
+				lp.CameraMaxZoomDistance = 128
+				characterTransparency(0)
+			end)
+		end)
+	end
+
+	table.insert(NYB.cleanups, function()
+		if tpConn then pcall(function() tpConn:Disconnect() end) tpConn = nil end
+	end)
+
+	--==== INFINITY ZOOM OUT ====
+	-- Beda dari "Zoom Unlock" yang sudah ada (max 500 stud): ini beneran tanpa
+	-- batas. Dua-duanya nulis property yang sama, jadi kalau yang ini nyala,
+	-- Zoom Unlock dimatiin biar nggak rebutan.
+	NYB.infinityZoom = function(on)
+		pcall(function()
+			if on then
+				lp.CameraMaxZoomDistance = math.huge
+				lp.CameraMinZoomDistance = 0
+			else
+				lp.CameraMaxZoomDistance = 12
+				lp.CameraMinZoomDistance = 0.5
+			end
+		end)
+	end
+
+	--==== DBD CAMERA ====
+	-- Port DBD_Start / DBD_Stop / DBD_initYaw / DBD_isLookTouch dari Aeris.
+	local DBD = {
+		yaw = 0, pitch = 0.12, lookInput = nil, lastPos = nil,
+		conn = nil, chg = nil, beg = nil, endc = nil, oldFOV = nil,
+	}
+
+	local function dbdIsLookTouch(pos)
+		local vp = cam and cam.ViewportSize
+		if not vp then return false end
+		-- sisi kanan layar = area ngeliat (Aeris: > 22% lebar viewport)
+		return pos.X > vp.X * 0.22
+	end
+
+	local function dbdInitYaw()
+		local hrp = NYB.hrp()
+		if not hrp then return end
+		local look = hrp.CFrame.LookVector * Vector3.new(1, 0, 1)
+		if look.Magnitude > 0.05 then
+			DBD.yaw = math.atan2(-look.X, -look.Z)
+		end
+	end
+
+	local function dbdStop()
+		for _, k in ipairs({ "conn", "chg", "beg", "endc" }) do
+			if DBD[k] then
+				pcall(function() DBD[k]:Disconnect() end)
+				DBD[k] = nil
+			end
+		end
+		pcall(function() cam.CameraType = Enum.CameraType.Custom end)
+		if DBD.oldFOV then pcall(function() cam.FieldOfView = DBD.oldFOV end) end
+		DBD.lookInput = nil
+		DBD.lastPos = nil
+	end
+
+	local function dbdStart()
+		dbdStop()
+		if not CFG.DBDCamera then return end
+
+		dbdInitYaw()
+		pcall(function()
+			DBD.oldFOV = cam.FieldOfView
+			cam.CameraType = Enum.CameraType.Scriptable
+			cam.FieldOfView = CFG.DBDFOV
+		end)
+		local hum = NYB.hum()
+		if hum then pcall(function() hum.AutoRotate = true end) end
+
+		DBD.chg = UIS.InputChanged:Connect(function(input)
+			if input.UserInputType ~= Enum.UserInputType.Touch then return end
+			if input ~= DBD.lookInput then return end
+			local pos = input.Position
+			if DBD.lastPos then
+				DBD.yaw = DBD.yaw - (pos.X - DBD.lastPos.X) * 0.011 * CFG.DBDSens
+				DBD.pitch = math.clamp(
+					DBD.pitch - (pos.Y - DBD.lastPos.Y) * 0.011 * CFG.DBDSens,
+					CFG.DBDPitchMin, CFG.DBDPitchMax)
+			end
+			DBD.lastPos = pos
+		end)
+
+		DBD.beg = UIS.InputBegan:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.Touch and dbdIsLookTouch(input.Position) then
+				DBD.lookInput = input
+				DBD.lastPos = input.Position
+			end
+		end)
+
+		DBD.endc = UIS.InputEnded:Connect(function(input)
+			if input == DBD.lookInput then
+				DBD.lookInput = nil
+				DBD.lastPos = nil
+			end
+		end)
+
+		DBD.conn = RunService.RenderStepped:Connect(function(dt)
+			if not CFG.DBDCamera then return end
+			local hrp = NYB.hrp()
+			if not hrp then return end
+			local dir = Vector3.new(
+				math.sin(DBD.yaw) * math.cos(DBD.pitch),
+				math.sin(DBD.pitch),
+				math.cos(DBD.yaw) * math.cos(DBD.pitch))
+			local target = hrp.Position + Vector3.new(0, 1.6, 0)
+			local goalPos = target - dir * CFG.DBDDistance + Vector3.new(0, CFG.DBDHeight - 1.6, 0)
+			local goal = CFrame.lookAt(goalPos, target)
+			-- smoothing lebih ringan saat jari lagi nempel (LookSmooth) daripada
+			-- saat kamera ngikut lari (RunSmooth) -- angka & rumus dari Aeris
+			local lookSmooth = DBD.lookInput and CFG.DBDLookSmooth or CFG.DBDRunSmooth
+			local alpha = 1 - math.pow(1 - lookSmooth, dt * 60)
+			cam.CFrame = cam.CFrame:Lerp(goal, alpha)
+		end)
+	end
+
+	NYB.dbdStart = dbdStart
+	NYB.dbdStop = dbdStop
+
+	-- respawn: kamera balik ke Custom, jadi DBD & Third Person harus dipasang ulang
+	NYB.bind(lp.CharacterAdded, function()
+		task.wait(0.6)
+		if CFG.DBDCamera then
+			pcall(function() cam = workspace.CurrentCamera end)
+			dbdStart()
+		end
+		if CFG.ThirdPerson then NYB.thirdPerson(true) end
+	end)
+
+	table.insert(NYB.cleanups, function()
+		for _, k in ipairs({ "conn", "chg", "beg", "endc" }) do
+			if DBD[k] then pcall(function() DBD[k]:Disconnect() end) DBD[k] = nil end
+		end
+		pcall(function() cam.CameraType = Enum.CameraType.Custom end)
+	end)
+
+	--==== REMOVE TEXTURE (LOW GFX) ====
+	-- Port LowGFX_ProcessOne / ApplyLowGFX / RestoreLowGFX dari Aeris.
+	-- Tiap objek yang diubah disimpan dulu nilai aslinya biar bisa dibalikin.
+	-- Skybox sengaja TIDAK dihapus (Aeris naruh itu di sub-option terpisah);
+	-- hapus Sky bikin langit item total dan di sini itu kerasa kayak bug.
+	local lowSaved = {}
+
+	local function lowSave(obj, kind, extra)
+		if #lowSaved > 6000 then return end
+		table.insert(lowSaved, { obj = obj, kind = kind, extra = extra })
+	end
+
+	local function lowProcessOne(d)
+		if not CFG.RemoveTexture or not d then return end
+		pcall(function()
+			if (d:IsA("BasePart") or d:IsA("UnionOperation") or d:IsA("MeshPart"))
+				and d.Material ~= Enum.Material.SmoothPlastic then
+				lowSave(d, "Part", d.Material)
+				d.Material = Enum.Material.SmoothPlastic
+			end
+			if (d:IsA("ParticleEmitter") or d:IsA("Smoke") or d:IsA("Explosion")
+				or d:IsA("Sparkles") or d:IsA("Fire")) and d.Enabled ~= false then
+				lowSave(d, "Particle", true)
+				d.Enabled = false
+			end
+			if (d:IsA("BloomEffect") or d:IsA("BlurEffect") or d:IsA("DepthOfFieldEffect")
+				or d:IsA("SunRaysEffect") or d:IsA("ColorCorrectionEffect")) and d.Enabled ~= false then
+				lowSave(d, "VFX", true)
+				d.Enabled = false
+			end
+			if (d:IsA("Decal") or d:IsA("Texture")) and d.Texture ~= "" then
+				lowSave(d, "Texture", d.Texture)
+				d.Texture = ""
+			end
+		end)
+	end
+
+	local function lowApply()
+		if not CFG.RemoveTexture then return end
+		for _, root in ipairs({ workspace, Lighting }) do
+			local i = 0
+			for _, d in ipairs(root:GetDescendants()) do
+				i = i + 1
+				if i % 250 == 0 then task.wait() end
+				if not CFG.RemoveTexture then return end
+				lowProcessOne(d)
+			end
+		end
+	end
+
+	local function lowRestore()
+		for _, s in ipairs(lowSaved) do
+			local o = s.obj
+			if o and o.Parent then
+				pcall(function()
+					if s.kind == "Part" then
+						o.Material = s.extra
+					elseif s.kind == "Texture" then
+						o.Texture = s.extra
+					else
+						o.Enabled = s.extra
+					end
+				end)
+			end
+		end
+		table.clear(lowSaved)
+	end
+
+	NYB.lowGfx = function(on)
+		if on then
+			task.spawn(lowApply)
+		else
+			lowRestore()
+		end
+	end
+
+	-- map baru yang di-stream masuk juga harus diproses, kalau nggak cuma
+	-- bagian awal map yang kehilangan tekstur
+	NYB.bind(workspace.DescendantAdded, function(d)
+		if not CFG.RemoveTexture then return end
+		task.defer(lowProcessOne, d)
+	end)
+
+	table.insert(NYB.cleanups, function()
+		pcall(lowRestore)
+	end)
+end
+
 --===================== [ 12. SELF TEST + UNLOAD ] =========================
 do
 	NYB.selfTest = function()
@@ -6153,6 +6538,51 @@ do
 	U.slider(T.vis.page, "Time of Day (0 = off)", 0, 24, 0, 0, function(v)
 		CFG.TimeOfDay = v > 0 and v or -1
 		NYB.applyVisual()
+	end)
+
+	--======== VISUAL: KAMERA (port Aeris) ========
+	U.section(T.vis.page, "Kamera")
+	U.toggle(T.vis.page, "Third Person (Killer)", "ThirdPerson", function(v) NYB.thirdPerson(v) end)
+	U.toggle(T.vis.page, "Infinity Zoom Out", "InfinityZoom", function(v)
+		CFG.InfinityZoom = v
+		-- Zoom Unlock (yang sudah ada) nulis property zoom yang sama dengan
+		-- batas 500 stud. Infinity Zoom lebih kuat, jadi kalau ini nyala yang
+		-- lama dimatiin -- kalau nggak, yang terakhir di-toggle yang menang.
+		if v and CFG.InfZoom then NYB.setCfg("InfZoom", false) end
+		NYB.infinityZoom(v)
+	end)
+	U.toggle(T.vis.page, "DBD Camera", "DBDCamera", function(v)
+		CFG.DBDCamera = v
+		if v then
+			-- DBD nulis cam.CFrame tiap frame; Third Person juga. Dua-duanya
+			-- nggak bisa jalan bareng, jadi yang ini menang.
+			if CFG.ThirdPerson then NYB.setCfg("ThirdPerson", false) end
+			NYB.dbdStart()
+		else
+			NYB.dbdStop()
+		end
+	end)
+	U.slider(T.vis.page, "DBD Distance", 6, 20, CFG.DBDDistance, 1, function(v) CFG.DBDDistance = v end)
+	U.slider(T.vis.page, "DBD Height", 1, 8, CFG.DBDHeight, 1, function(v) CFG.DBDHeight = v end)
+	U.slider(T.vis.page, "DBD Run Smooth", 0.03, 0.35, CFG.DBDRunSmooth, 2, function(v) CFG.DBDRunSmooth = v end)
+	U.slider(T.vis.page, "DBD Look Smooth", 0.08, 0.6, CFG.DBDLookSmooth, 2, function(v) CFG.DBDLookSmooth = v end)
+	U.slider(T.vis.page, "DBD Sensitivity", 0.15, 1.2, CFG.DBDSens, 2, function(v) CFG.DBDSens = v end)
+	U.slider(T.vis.page, "DBD Pitch Min", -1.2, 0, CFG.DBDPitchMin, 2, function(v) CFG.DBDPitchMin = v end)
+	U.slider(T.vis.page, "DBD Pitch Max", 0, 1.2, CFG.DBDPitchMax, 2, function(v) CFG.DBDPitchMax = v end)
+	U.slider(T.vis.page, "DBD FOV", 50, 90, CFG.DBDFOV, 0, function(v)
+		CFG.DBDFOV = v
+		if CFG.DBDCamera then pcall(function() cam.FieldOfView = v end) end
+	end)
+
+	--======== VISUAL: PERFORMA (port Aeris) ========
+	U.section(T.vis.page, "Performa")
+	U.toggle(T.vis.page, "No Shadow", "NoShadow", function(v)
+		CFG.NoShadow = v
+		NYB.applyPerf()
+	end)
+	U.toggle(T.vis.page, "Remove Texture (Low GFX)", "RemoveTexture", function(v)
+		CFG.RemoveTexture = v
+		NYB.lowGfx(v)
 	end)
 
 	--======== TELEPORT ========
