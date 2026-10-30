@@ -140,6 +140,16 @@ local CFG = {
 	-- Performa (port Aeris)
 	NoShadow       = false,
 	RemoveTexture  = false,
+	-- Crosshair (port Aeris)
+	CrossStyle     = "Plus",
+	CrossThick     = 2,
+	CrossOffX      = 0,
+	CrossOffY      = 0,
+	CrossKey       = "None",
+	-- Info overlay (port Aeris)
+	KillerPerks    = false,
+	StunRing       = false,
+	Spectator      = false,
 	-- ESP
 	EspPlayers     = false,
 	EspChams       = false,
@@ -4148,6 +4158,10 @@ do
 		return mode
 	end
 
+	--==== CROSSHAIR: style / ketebalan / posisi ====
+	-- Bentuk "Plus" tetap gambar yang lama (4 batang bercelah); Dot dan Circle
+	-- dari port Aeris. Thickness default 2 dan offset 0 -> sama persis kayak
+	-- sebelumnya, jadi nggak ada perubahan tampilan buat yang gak nyentuh ini.
 	NYB.buildCrosshair = function()
 		if crossGui and crossGui.Parent then
 			crossGui:Destroy()
@@ -4155,24 +4169,48 @@ do
 		crossGui = nil
 		if not CFG.Crosshair then return end
 		local s = CFG.CrossSize
+		local th = math.clamp(tonumber(CFG.CrossThick) or 2, 1, 5)
+		local ox = tonumber(CFG.CrossOffX) or 0
+		local oy = tonumber(CFG.CrossOffY) or 0
+		local style = CFG.CrossStyle or "Plus"
 		crossGui = Instance.new("ScreenGui")
 		crossGui.Name = "NYB_Crosshair"
 		crossGui.ResetOnSpawn = false
 		crossGui.IgnoreGuiInset = true
 		crossGui.Parent = NYB.ui.gui
-		local function bar(w, h, x, y)
+		local function frame(w, h, x, y, centered)
 			local f = Instance.new("Frame")
 			f.Size = UDim2.new(0, w, 0, h)
-			f.Position = UDim2.new(0.5, x, 0.5, y)
+			f.Position = UDim2.new(0.5, x + ox, 0.5, y + oy)
+			if centered then f.AnchorPoint = Vector2.new(0.5, 0.5) end
 			f.BackgroundColor3 = CFG.Accent
 			f.BorderSizePixel = 0
 			f.ZIndex = 20
 			f.Parent = crossGui
+			return f
 		end
-		bar(s, 2, -s - 3, -1)
-		bar(s, 2, 3, -1)
-		bar(2, s, -1, -s - 3)
-		bar(2, s, -1, 3)
+		if style == "Dot" then
+			local d = frame(s, s, 0, 0, true)
+			local c = Instance.new("UICorner")
+			c.CornerRadius = UDim.new(1, 0)
+			c.Parent = d
+		elseif style == "Circle" then
+			local d = frame(s * 2, s * 2, 0, 0, true)
+			d.BackgroundTransparency = 1
+			local st = Instance.new("UIStroke")
+			st.Color = CFG.Accent
+			st.Thickness = th
+			st.Parent = d
+			local c = Instance.new("UICorner")
+			c.CornerRadius = UDim.new(1, 0)
+			c.Parent = d
+		else
+			local half = th / 2
+			frame(s, th, -s - 3, -half)
+			frame(s, th, 3, -half)
+			frame(th, s, -half, -s - 3)
+			frame(th, s, -half, 3)
+		end
 	end
 
 	--======== AIMBOT APPLICATION ========
@@ -6056,6 +6094,342 @@ do
 	end)
 end
 
+--===================== [ 11c. PORT AERIS: INFO OVERLAY ] ==================
+-- Port ADITIF dari source Aeris (baris 5843-5960, 12195-12740, 16991-17022).
+-- Tiga overlay: Killer Perks Display, Killer Stun Indicator, Spectator Info.
+-- Next Killer / Next Map sudah ada di NYB, jadi nggak diutak-atik.
+do
+	--==== KILLER PERKS DISPLAY ====
+	-- Aeris baca anak-anak karakter killer yang namanya berakhiran angka
+	-- ("Nama Perk 3"), terus buang nama body part. Itu sumber datanya.
+	local perksGui, perksLabel = nil, nil
+
+	local BODY_NAMES = {
+		head = true, torso = true, humanoid = true, humanoidrootpart = true,
+		["left arm"] = true, ["right arm"] = true, ["left leg"] = true, ["right leg"] = true,
+	}
+
+	local function perkParse(name)
+		local base, lvl = tostring(name or ""):match("^(.+)%s+(%d+)$")
+		if not base then return nil end
+		base = base:gsub("^%s+", ""):gsub("%s+$", "")
+		if base == "" or BODY_NAMES[base:lower()] then return nil end
+		return base, lvl
+	end
+
+	local function richEscape(s)
+		return tostring(s or ""):gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;")
+	end
+
+	local function perksBuild()
+		if perksGui and perksGui.Parent then pcall(function() perksGui:Destroy() end) end
+		perksGui, perksLabel = nil, nil
+		if not CFG.KillerPerks then return end
+		perksGui = Instance.new("ScreenGui")
+		perksGui.Name = "NYB_KillerPerks"
+		perksGui.ResetOnSpawn = false
+		perksGui.IgnoreGuiInset = true
+		perksGui.Parent = NYB.ui.gui
+
+		local holder = Instance.new("Frame")
+		holder.Size = UDim2.new(0, 180, 0, 85)
+		holder.Position = UDim2.new(0.08, 0, 0.22, 0)
+		holder.BackgroundTransparency = 1
+		holder.Parent = perksGui
+
+		local panel = Instance.new("Frame")
+		panel.Size = UDim2.new(1, 0, 1, 0)
+		panel.BackgroundColor3 = Color3.fromRGB(10, 10, 12)
+		panel.BackgroundTransparency = 0.15
+		panel.BorderSizePixel = 0
+		panel.Parent = holder
+		local pc = Instance.new("UICorner")
+		pc.CornerRadius = UDim.new(0, 6)
+		pc.Parent = panel
+		local ps = Instance.new("UIStroke")
+		ps.Color = Color3.fromRGB(60, 60, 70)
+		ps.Thickness = 1
+		ps.Transparency = 0.3
+		ps.Parent = panel
+
+		local head = Instance.new("Frame")
+		head.Size = UDim2.new(1, 0, 0, 24)
+		head.BackgroundColor3 = Color3.fromRGB(15, 15, 20)
+		head.BorderSizePixel = 0
+		head.Parent = panel
+		local hc = Instance.new("UICorner")
+		hc.CornerRadius = UDim.new(0, 6)
+		hc.Parent = head
+
+		local title = Instance.new("TextLabel")
+		title.Size = UDim2.new(1, -60, 1, 0)
+		title.Position = UDim2.new(0, 8, 0, 0)
+		title.BackgroundTransparency = 1
+		title.Font = Enum.Font.GothamSemibold
+		title.Text = "Killer Perks Info"
+		title.TextColor3 = Color3.fromRGB(220, 220, 230)
+		title.TextSize = 11
+		title.TextXAlignment = Enum.TextXAlignment.Left
+		title.Parent = head
+
+		perksLabel = Instance.new("TextLabel")
+		perksLabel.Size = UDim2.new(1, -14, 1, -32)
+		perksLabel.Position = UDim2.new(0, 8, 0, 28)
+		perksLabel.BackgroundTransparency = 1
+		perksLabel.Font = Enum.Font.GothamMedium
+		perksLabel.RichText = true
+		perksLabel.TextXAlignment = Enum.TextXAlignment.Left
+		perksLabel.TextYAlignment = Enum.TextYAlignment.Top
+		perksLabel.TextColor3 = Color3.fromRGB(220, 220, 230)
+		perksLabel.TextSize = 11
+		perksLabel.TextWrapped = false
+		perksLabel.Parent = panel
+	end
+
+	local function killerPlayer()
+		for _, p in ipairs(Players:GetPlayers()) do
+			if NYB.isKiller(p) then return p end
+		end
+		return nil
+	end
+
+	local function perksOf(p)
+		local out, seen = {}, {}
+		if not p then return out end
+		local model = p.Character or workspace:FindFirstChild(p.Name) or workspace:FindFirstChild(p.DisplayName)
+		if not model then return out end
+		for _, ch in ipairs(model:GetChildren()) do
+			local nm, lvl = perkParse(ch.Name)
+			if nm and not seen[nm] then
+				seen[nm] = true
+				table.insert(out, { Name = nm, Level = lvl })
+			end
+		end
+		table.sort(out, function(a, b) return tostring(a.Name) < tostring(b.Name) end)
+		return out
+	end
+
+	local function perksTick()
+		if not (CFG.KillerPerks and perksLabel) then return end
+		local kp = killerPlayer()
+		local name = kp and (kp.DisplayName or kp.Name) or "Unknown"
+		local list = perksOf(kp)
+		local lines = { "Killer Perks [<font color=\"rgb(255,80,80)\">" .. richEscape(name) .. "</font>]" }
+		if #list == 0 then
+			table.insert(lines, "<font color=\"rgb(200,200,200)\">- Waiting for perk data...</font>")
+		else
+			for i = 1, math.min(#list, 4) do
+				local it = list[i]
+				local lvl = it.Level and (" lvl " .. tostring(it.Level)) or ""
+				table.insert(lines, "<font color=\"rgb(200,200,200)\">- " .. richEscape(it.Name .. lvl) .. "</font>")
+			end
+		end
+		perksLabel.Text = table.concat(lines, "\n")
+	end
+
+	NYB.killerPerks = function(on)
+		if on then
+			perksBuild()
+		else
+			if perksGui then pcall(function() perksGui:Destroy() end) end
+			perksGui, perksLabel = nil, nil
+		end
+	end
+
+	--==== KILLER STUN INDICATOR ====
+	-- Cincin muter di atas kepala killer tiap atribut IsStunned / Immobile true.
+	local stunData = {}
+
+	local function stunRingBuild(hrp)
+		local old = hrp:FindFirstChild("NYB_StunRing")
+		if old then pcall(function() old:Destroy() end) end
+		local bb = Instance.new("BillboardGui")
+		bb.Name = "NYB_StunRing"
+		bb.Adornee = hrp
+		bb.AlwaysOnTop = true
+		bb.Size = UDim2.new(0, 40, 0, 40)
+		bb.StudsOffsetWorldSpace = Vector3.new(0, 4.5, 0)
+		bb.ResetOnSpawn = false
+		bb.LightInfluence = 0
+		bb.Enabled = false
+		bb.Parent = hrp
+		local img = Instance.new("ImageLabel")
+		img.Size = UDim2.new(1, 0, 1, 0)
+		img.BackgroundTransparency = 1
+		img.Image = "rbxassetid://129594563448607"
+		img.ScaleType = Enum.ScaleType.Fit
+		img.Parent = bb
+
+		task.spawn(function()
+			local angle = 0
+			while bb and bb.Parent and CFG.StunRing do
+				if bb.Enabled and cam then
+					angle = (angle + 6) % 360
+					img.Rotation = angle
+					-- makin jauh makin gede biar tetap kebaca (angka dari Aeris)
+					local d = (cam.CFrame.Position - hrp.Position).Magnitude
+					local px = math.clamp(math.floor(600 / math.max(d, 1)), 22, 44)
+					bb.Size = UDim2.new(0, px, 0, px)
+				end
+				task.wait(0.1)
+			end
+			pcall(function() bb:Destroy() end)
+		end)
+		return bb
+	end
+
+	local function stunWatch(char)
+		if not char or stunData[char] then return end
+		local hrp = char:FindFirstChild("HumanoidRootPart")
+		if not hrp then return end
+		local bb = stunRingBuild(hrp)
+		local rec = { ring = bb, timer = nil, conns = {} }
+		stunData[char] = rec
+
+		local function trigger(dur)
+			if not rec.ring then return end
+			rec.ring.Enabled = true
+			if rec.timer then pcall(task.cancel, rec.timer) end
+			rec.timer = task.delay(dur or 2.2, function()
+				if rec.ring then rec.ring.Enabled = false end
+			end)
+		end
+
+		for _, attr in ipairs({ "IsStunned", "Immobile" }) do
+			local ok, c = pcall(function()
+				return char:GetAttributeChangedSignal(attr):Connect(function()
+					if char:GetAttribute(attr) == true then trigger(2.2) end
+				end)
+			end)
+			if ok and c then table.insert(rec.conns, c) end
+		end
+	end
+
+	local function stunClear()
+		for char, rec in pairs(stunData) do
+			if rec.timer then pcall(task.cancel, rec.timer) end
+			for _, c in ipairs(rec.conns) do pcall(function() c:Disconnect() end) end
+			if rec.ring then pcall(function() rec.ring:Destroy() end) end
+			stunData[char] = nil
+		end
+	end
+
+	local function stunScan()
+		if not CFG.StunRing then return end
+		for _, p in ipairs(Players:GetPlayers()) do
+			if NYB.isKiller(p) and p.Character then stunWatch(p.Character) end
+		end
+	end
+
+	NYB.stunRing = function(on)
+		if not on then stunClear() return end
+		stunScan()
+	end
+
+	NYB.bind(Players.PlayerAdded, function(p)
+		NYB.bind(p.CharacterAdded, function(ch)
+			task.wait(0.5)
+			if CFG.StunRing and NYB.isKiller(p) then stunWatch(ch) end
+		end)
+	end)
+	NYB.bind(lp.CharacterAdded, function()
+		task.wait(1.5)
+		stunScan()
+	end)
+
+	--==== SPECTATOR INFO ====
+	-- Hitung pemain yang di tim "Spectator", tampil di tengah-bawah.
+	local specGui, specLbl = nil, nil
+
+	local function specBuild()
+		if specGui and specGui.Parent then pcall(function() specGui:Destroy() end) end
+		specGui, specLbl = nil, nil
+		if not CFG.Spectator then return end
+		specGui = Instance.new("ScreenGui")
+		specGui.Name = "NYB_SpectatorInfo"
+		specGui.ResetOnSpawn = false
+		specGui.IgnoreGuiInset = true
+		specGui.Parent = NYB.ui.gui
+
+		local box = Instance.new("Frame")
+		box.Name = "MainBox"
+		box.AnchorPoint = Vector2.new(0.5, 1)
+		box.Position = UDim2.new(0.5, 0, 0, -10)
+		box.Size = UDim2.new(0, 68, 0, 22)
+		box.BackgroundColor3 = Color3.fromRGB(16, 16, 18)
+		box.BackgroundTransparency = 0.15
+		box.BorderSizePixel = 0
+		box.Parent = specGui
+		local bc = Instance.new("UICorner")
+		bc.CornerRadius = UDim.new(0, 6)
+		bc.Parent = box
+
+		local icon = Instance.new("TextLabel")
+		icon.Size = UDim2.new(0, 22, 1, 0)
+		icon.Position = UDim2.new(0, 4, 0, 0)
+		icon.BackgroundTransparency = 1
+		icon.Font = Enum.Font.GothamBold
+		icon.Text = "👁"
+		icon.TextColor3 = Color3.fromRGB(180, 150, 255)
+		icon.TextSize = 12
+		icon.Parent = box
+
+		specLbl = Instance.new("TextLabel")
+		specLbl.Size = UDim2.new(1, -28, 1, 0)
+		specLbl.Position = UDim2.new(0, 26, 0, 0)
+		specLbl.BackgroundTransparency = 1
+		specLbl.Font = Enum.Font.GothamBold
+		specLbl.TextColor3 = Color3.fromRGB(235, 235, 240)
+		specLbl.TextSize = 13
+		specLbl.TextXAlignment = Enum.TextXAlignment.Left
+		specLbl.Text = "0"
+		specLbl.Parent = box
+	end
+
+	local function specTick()
+		if not (CFG.Spectator and specLbl and specGui) then return end
+		local n = 0
+		for _, p in ipairs(Players:GetPlayers()) do
+			local t = p.Team
+			if t and string.lower(t.Name) == "spectator" then n = n + 1 end
+		end
+		specLbl.Text = tostring(n)
+		local box = specGui:FindFirstChild("MainBox")
+		if box then
+			box.Size = UDim2.new(0, 55 + (n >= 10 and 8 or 0) + (n >= 100 and 8 or 0), 0, 22)
+		end
+	end
+
+	NYB.spectator = function(on)
+		if on then
+			specBuild()
+			specTick()
+		else
+			if specGui then pcall(function() specGui:Destroy() end) end
+			specGui, specLbl = nil, nil
+		end
+	end
+
+	--==== LOOP BERSAMA ====
+	-- Perks + spectator di-refresh 1x/detik, bukan tiap frame: dua-duanya
+	-- cuma baca daftar pemain, nggak ada gunanya jalan 60x/detik.
+	local infoLast = 0
+	NYB.bind(RunService.Heartbeat, function()
+		if not (CFG.KillerPerks or CFG.Spectator) then return end
+		local now = tick()
+		if now - infoLast < 1 then return end
+		infoLast = now
+		pcall(perksTick)
+		pcall(specTick)
+	end)
+
+	table.insert(NYB.cleanups, function()
+		if perksGui then pcall(function() perksGui:Destroy() end) perksGui, perksLabel = nil, nil end
+		if specGui then pcall(function() specGui:Destroy() end) specGui, specLbl = nil, nil end
+		pcall(stunClear)
+	end)
+end
+
 --===================== [ 12. SELF TEST + UNLOAD ] =========================
 do
 	NYB.selfTest = function()
@@ -6327,6 +6701,26 @@ do
 	U.slider(T.aim.page, "Spear Max Dist", 50, 2000, CFG.SpearMaxDist, 0, function(v) CFG.SpearMaxDist = v end)
 	U.slider(T.aim.page, "Spear Lead", 0, 3, CFG.SpearLead, 2, function(v) CFG.SpearLead = v end)
 	U.button(T.aim.page, "Crosshair ON/OFF", function()
+		NYB.setCfg("Crosshair", not CFG.Crosshair)
+		NYB.buildCrosshair()
+	end)
+	U.dropdown(T.aim.page, "Crosshair Style", { "Plus", "Dot", "Circle" }, "Plus", "CrossStyle", function()
+		NYB.buildCrosshair()
+	end)
+	U.slider(T.aim.page, "Crosshair Thickness", 1, 5, CFG.CrossThick, 0, function(v)
+		CFG.CrossThick = v
+		NYB.buildCrosshair()
+	end)
+	U.slider(T.aim.page, "Crosshair Position X", -100, 100, CFG.CrossOffX, 0, function(v)
+		CFG.CrossOffX = v
+		NYB.buildCrosshair()
+	end)
+	U.slider(T.aim.page, "Crosshair Position Y", -100, 100, CFG.CrossOffY, 0, function(v)
+		CFG.CrossOffY = v
+		NYB.buildCrosshair()
+	end)
+	U.keybind(T.aim.page, "Crosshair Toggle Key", "None", function(k) CFG.CrossKey = k end)
+	NYB.hotkey("CrossKey", function()
 		NYB.setCfg("Crosshair", not CFG.Crosshair)
 		NYB.buildCrosshair()
 	end)
@@ -6671,6 +7065,9 @@ do
 	U.section(T.misc.page, "Info Overlay (port)")
 	U.toggle(T.misc.page, "Next Killer Display", "NextKiller", function(v) CFG.NextKiller = v end)
 	U.toggle(T.misc.page, "Next Map Display", "NextMap", function(v) CFG.NextMap = v end)
+	U.toggle(T.misc.page, "Killer Perks Display", "KillerPerks", function(v) NYB.killerPerks(v) end)
+	U.toggle(T.misc.page, "Killer Stun Indicator", "StunRing", function(v) NYB.stunRing(v) end)
+	U.toggle(T.misc.page, "Spectator Info", "Spectator", function(v) NYB.spectator(v) end)
 
 	U.section(T.misc.page, "Gate")
 	U.toggle(T.misc.page, "Bypass Exit Gate", "BypassGate", function(v)
