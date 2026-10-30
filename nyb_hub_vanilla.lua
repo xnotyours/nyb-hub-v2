@@ -3089,6 +3089,68 @@ NYB.ui.slider = function(page, text, min, max, default, decimals, callback)
 	}
 end
 
+-- Engine ini punya AddDropdown + AddKeybind, tapi NYB.ui belum punya wrapper-nya.
+-- Kontrak engine (diverifikasi dari section 5):
+--   sec:AddDropdown(nama, opsi, default, cb) -> ddObj  (:SetValue / :GetValue / .Value)
+--   sec:AddKeybind(nama, defaultKey, cb)     -> kBtn   (objeknya di lib.Options[nama])
+NYB.ui.dropdown = function(page, text, options, default, key, callback)
+	local sec = NYB.ui.secFor(page)
+	if not sec then
+		warn("[NYB HUB] dropdown '" .. tostring(text) .. "': section tidak ada")
+		return nil
+	end
+	local def = default
+	if type(key) == "string" and CFG[key] ~= nil then def = CFG[key] end
+	local ok, el = pcall(function()
+		return sec:AddDropdown(tostring(text), options, def, function(v)
+			if type(key) == "string" then CFG[key] = v end
+			if callback then
+				local okc, err = pcall(callback, v)
+				if not okc then warn("[NYB HUB] dropdown error: " .. tostring(err)) end
+			end
+		end)
+	end)
+	if not ok or type(el) ~= "table" then
+		warn("[NYB HUB] dropdown '" .. tostring(text) .. "' gagal: " .. tostring(el))
+		return nil
+	end
+	local api = {
+		key = (type(key) == "string") and key or nil,
+		el  = el,
+		set = function(v)
+			if type(el.SetValue) == "function" then pcall(function() el:SetValue(v) end) end
+		end,
+		get = function()
+			if type(el.GetValue) == "function" then
+				local okg, g = pcall(function() return el:GetValue() end)
+				if okg then return g end
+			end
+			return nil
+		end,
+	}
+	if api.key then NYB.ui.reg[api.key] = api end
+	return api
+end
+
+NYB.ui.keybind = function(page, text, defaultKey, callback)
+	local sec = NYB.ui.secFor(page)
+	if not sec then
+		warn("[NYB HUB] keybind '" .. tostring(text) .. "': section tidak ada")
+		return nil
+	end
+	local ok, el = pcall(function()
+		return sec:AddKeybind(tostring(text), tostring(defaultKey or "None"), function(k)
+			if callback then
+				local okc, err = pcall(callback, k)
+				if not okc then warn("[NYB HUB] keybind error: " .. tostring(err)) end
+			end
+		end)
+	end)
+	if not ok then warn("[NYB HUB] keybind '" .. tostring(text) .. "' gagal: " .. tostring(el)) end
+	local obj = NYB.ui.lib and NYB.ui.lib.Options and NYB.ui.lib.Options[tostring(text)]
+	return { el = el, obj = obj }
+end
+
 NYB.ui.button = function(page, text, callback)
 	local sec = NYB.ui.secFor(page)
 	if not sec then
@@ -3149,6 +3211,30 @@ NYB.setCfg = function(key, v)
 	local t = NYB.ui.reg[key]
 	if t and t.set then t.set(v) end
 end
+
+--==== HOTKEY PER FITUR (pola KeyPicker Aeris) ================================
+-- Satu listener global, banyak aksi: biar tiap port gak bikin listener sendiri.
+-- Pakai:
+--   U.keybind(page, "Parry Sekarang", "F", function(k) CFG.ParryKey = k end)
+--   NYB.hotkey("ParryKey", function() NYB.parry() end)
+NYB.hotkeys = {}
+NYB.hotkey = function(cfgKey, fn)
+	if type(cfgKey) ~= "string" or type(fn) ~= "function" then return end
+	table.insert(NYB.hotkeys, { key = cfgKey, fn = fn })
+end
+NYB.bind(UIS.InputBegan, function(input, gameProcessed)
+	if gameProcessed then return end
+	if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+	local name = input.KeyCode and input.KeyCode.Name or nil
+	if not name or name == "None" then return end
+	for _, h in ipairs(NYB.hotkeys) do
+		if CFG[h.key] == name then
+			local ok, err = pcall(h.fn)
+			if not ok then warn("[NYB HUB] hotkey error: " .. tostring(err)) end
+		end
+	end
+end)
+
 
 task.wait(0.2)
 --===================== [ 6. ESP ENGINE ] ==================================
