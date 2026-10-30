@@ -802,7 +802,7 @@ end, function()
 	N.setCfg("EspPlayers", false); N.setCfg("EspChams", false)
 	N.setCfg("EspName", false);    N.setCfg("EspDist", false)
 	N.espFrame()
-	if others == 0 then return false, "tidak ada pemain lain di server (bukan bug script)" end
+	if others == 0 then return nil, "skip: tidak ada pemain lain di server" end
 	return n > 0, string.format("objek ESP=%d dari %d pemain lain", n, others)
 end)
 
@@ -831,9 +831,9 @@ end)
 N.featureToggle("Aimbot", "Aimbot", nil, function()
 	local t = N.aim.getTarget()
 	N.setCfg("Aimbot", true)
-	local ok = t ~= nil
 	N.setCfg("Aimbot", false)
-	return ok, ok and "target ketemu: " .. t.Parent.Name or "tidak ada target dalam FOV"
+	if not t then return nil, "skip: tidak ada target dalam FOV" end
+	return true, "target ketemu: " .. tostring(t.Parent and t.Parent.Name)
 end)
 
 N.featureToggle("AutoHeal", "Auto Heal", nil, function()
@@ -846,7 +846,8 @@ N.featureToggle("AutoHeal", "Auto Heal", nil, function()
 			end
 		end
 	end)
-	return found, found and "ada bandage di backpack" or "tidak ada bandage (fitur butuh item)"
+	if not found then return nil, "skip: tidak ada bandage di backpack" end
+	return true, "ada bandage di backpack"
 end)
 
 N.featureToggle("AutoParry", "Auto Parry", nil, function()
@@ -870,7 +871,8 @@ N.featureToggle("KillAura", "Kill Aura", nil, function()
 			end
 		end
 	end
-	return near ~= nil, near and ("target dekat: " .. near.Name) or "tidak ada pemain dalam jangkauan"
+	if not near then return nil, "skip: tidak ada pemain dalam jangkauan" end
+	return true, "target dekat: " .. near.Name
 end)
 
 N.featureToggle("RemoteLog", "Remote Log", nil, function()
@@ -1051,23 +1053,34 @@ N.runSelfTest = function()
 	T("PlaceId      : " .. tostring(game.PlaceId))
 	T("character    : " .. (N.hrp() and "OK" or "TIDAK ADA"))
 	T("remote       : " .. #N.remotes.list)
-	local pass, fail = 0, 0
+	local g = N.ui.gui
+	T("gui overlay  : " .. (g and (tostring(g.ClassName) .. "  Enabled=" .. tostring(g.Enabled)
+		.. "  Parent=" .. tostring(g.Parent and g.Parent.Name)) or "NIL"))
+	local pass, fail, skip = 0, 0, 0
 	T("")
 	for _, f in ipairs(N.FEAT) do
-		local ok, detail
+		local v, detail = nil, "tidak ada test"
 		if f.test then
-			ok, detail = pcall(f.test)
-			if not ok then detail = "test error: " .. tostring(detail) end
-		else
-			ok, detail = nil, "tidak ada test"
+			local okc, a, b = pcall(f.test)
+			if not okc then
+				v, detail = false, "ERROR: " .. tostring(a)
+			else
+				v, detail = a, b
+			end
 		end
-		if ok == true then pass = pass + 1 elseif ok == false then fail = fail + 1 end
-		T(string.format("[%s] %-32s %s",
-			ok == true and "OK " or (ok == false and "!! " or "-- "), f.label, tostring(detail)))
+		if v == true then pass = pass + 1
+		elseif v == false then fail = fail + 1
+		else skip = skip + 1 end
+		T(string.format("[%-5s] %-28s %s",
+			v == true and "OK" or (v == false and "GAGAL" or "SKIP"),
+			f.label, detail ~= nil and tostring(detail) or ""))
 	end
 	T("")
-	T(string.format("VERDICT: %d OK, %d GAGAL, %d dilewati", pass, fail, #N.FEAT - pass - fail))
+	T(string.format("VERDICT: %d lulus, %d GAGAL, %d skip", pass, fail, skip))
 	T("==================================")
+	T("")
+	T("---- DUMP OBJEK MAP (buat benerin scan) ----")
+	for _, l in ipairs(N.mapDump()) do T(l) end
 
 	local txt = table.concat(L, "\n")
 	print(txt)
@@ -1187,6 +1200,49 @@ N.ui.hudUpdate = function()
 	local from = math.max(1, #N.logLines - 5)
 	for i = from, #N.logLines do tail[#tail + 1] = "> " .. tostring(N.logLines[i]) end
 	N.ui.hudLbl.Text = head .. "\n" .. table.concat(tail, "\n")
+end
+
+
+--===================== [ 14c. MAP DUMP ] ===================================
+-- scan() nebak nama objek dari keyword. Kalau salah tebak, hasilnya 0 dan
+-- "ESP Generator" gagal. Fungsi ini nge-dump nama asli yang ada di workspace
+-- supaya tebakannya bisa diganti data.
+N.mapDump = function()
+	local desc = workspace:GetDescendants()
+	local counts, kw = {}, {}
+	for _, d in ipairs(desc) do
+		local ok, nm, cl = pcall(function() return d.Name, d.ClassName end)
+		if ok and nm then
+			local key = cl .. "  |  " .. nm
+			counts[key] = (counts[key] or 0) + 1
+			local low = string.lower(nm)
+			if string.find(low, "gen", 1, true) or string.find(low, "gate", 1, true)
+				or string.find(low, "exit", 1, true) or string.find(low, "hook", 1, true)
+				or string.find(low, "pallet", 1, true) or string.find(low, "vault", 1, true)
+				or string.find(low, "lever", 1, true) or string.find(low, "window", 1, true) then
+				kw[key] = (kw[key] or 0) + 1
+			end
+		end
+	end
+	local function top(t, n)
+		local list = {}
+		for k, v in pairs(t) do list[#list + 1] = { k = k, v = v } end
+		table.sort(list, function(a, b) return a.v > b.v end)
+		local o = {}
+		for i = 1, math.min(n, #list) do
+			o[#o + 1] = string.format("  %4dx  %s", list[i].v, list[i].k)
+		end
+		return o
+	end
+	local out = {}
+	out[#out + 1] = "descendant total: " .. tostring(#desc)
+	out[#out + 1] = "TOP 18 nama terbanyak:"
+	for _, l in ipairs(top(counts, 18)) do out[#out + 1] = l end
+	out[#out + 1] = "KANDIDAT gen/gate/hook/pallet/vault/lever/window:"
+	local kl = top(kw, 18)
+	if #kl == 0 then out[#out + 1] = "  (TIDAK ADA nama yg cocok keyword)" end
+	for _, l in ipairs(kl) do out[#out + 1] = l end
+	return out
 end
 
 --===================== [ 15. BOOT ] ========================================
