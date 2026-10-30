@@ -13,8 +13,18 @@ Rebuild dari nol. Bukan tambalan dari v3.1.
 ## Load
 
 ```lua
-loadstring(game:HttpGet("https://raw.githubusercontent.com/xnotyours/nyb-hub-v2/main/nyb_hub_v2.lua"))()
+-- commit-pinned: immutable, gak kena cache CDN (lihat catatan cache di bawah)
+loadstring(game:HttpGet("https://raw.githubusercontent.com/xnotyours/nyb-hub-v2/ad38d49/nyb_hub_v2.lua"))()
 ```
+
+> **PENTING — `raw.githubusercontent.com` nge-cache `main` selama 5 menit.**
+> Headernya `cache-control: max-age=300` dan `x-cache: HIT`. Jadi habis push,
+> URL `.../main/nyb_hub_v2.lua` bisa masih nyajiin **versi lama** sampai 5 menit —
+> dan `?v=<timestamp>` **nggak nolongin**, GitHub tetap serve cache yang sama.
+> Yang bener: **pin commit SHA** (`.../<commit>/nyb_hub_v2.lua`) — immutable,
+> selalu versi itu. Commit terbaru: cek `git log --oneline -1`.
+> Verifikasi: `sha256sum` file lokal vs `curl -sL <url> | sha256sum`, harus sama.
+
 
 ## Kenapa ditulis ulang
 
