@@ -358,6 +358,8 @@ local CFG = {
 	GenBoost         = false,
 	GenBoostMode     = "Manual Repair",
 	GenBoostRange    = 8,
+	-- ==== PORT GRUP 8-9 (Target Part + Teleport) ====
+	TPPlayer         = "",
 	FakeName       = "NYB HUB",
 }
 
@@ -8555,6 +8557,129 @@ do
 	end
 end
 
+--===================== [ 11i. PORT AERIS: GRUP 8-9 ] ======================
+-- Port ADITIF grup 8-9 dari source Aeris:
+--   Target Part dropdown aimbot (getTargetPartObject, 7226-7235; UI 15858)
+--   Teleport map: Generator/Hook/Gate/Pallet/Window (17045-17188) +
+--   Teleport Player / Select Player (17190-17230).
+--
+-- NYB sudah punya mesin teleport-nya sendiri (NYB.tpTo) dan helper part
+-- (NYB.part) -- yang di-port di sini cuma daftar tombol + cara milih titik,
+-- persis pola Aeris. CFG.AimPart sudah dipakai tftPart() NYB, jadi dropdown
+-- di UI cuma nyambungin key yang sudah ada.
+--
+-- Grup 8 yang SENGAJA tidak di-port (dan alasannya):
+--   Perk Cooldown  -- slider itu cuma pengali buat fake-perk Aeris; di NYB
+--                     fitur itu punya timing sendiri, nge-port = ngubah fitur lama.
+--   BandageSpeed   -- di sumber dia load script dari script.panduhub.com
+--                     (loadstring+HttpGet). Kontrak melarang dependensi luar.
+--
+-- Key baru: TPPlayer. Default kosong.
+do
+	local Players = game:GetService("Players")
+	local lp = Players.LocalPlayer
+	local C = NYB.cache
+	local S = NYB.state
+
+	--=========== A. TELEPORT MAP (GANTIAN) ===========
+	-- Sama kayak Aeris: tiap klik maju ke item berikutnya, biar bisa muter
+	-- semua generator/hook/gate/pallet/window tanpa dropdown.
+	local LISTS = {
+		gen    = function() return C.genList or {} end,
+		hook   = function() return C.hookList or {} end,
+		gate   = function() return C.gateList or {} end,
+		pallet = function() return C.palletList or {} end,
+		window = function() return C.windowList or {} end,
+	}
+
+	local function partOf(kind, model)
+		if not model then return nil end
+		if kind == "gen" then
+			return NYB.part(model) or model:FindFirstChildWhichIsA("BasePart")
+		elseif kind == "hook" then
+			return model:FindFirstChild("HookPoint") or model:FindFirstChildWhichIsA("BasePart")
+		elseif kind == "pallet" then
+			return model:FindFirstChild("PrimaryPartPallet")
+				or model:FindFirstChild("PalletPoint", true)
+				or model:FindFirstChildWhichIsA("BasePart")
+		elseif kind == "window" then
+			return model:FindFirstChild("Bottom") or model:FindFirstChildWhichIsA("BasePart")
+		end
+		return model:FindFirstChildWhichIsA("BasePart")
+	end
+
+	NYB.tpCycle = function(kind)
+		local getter = LISTS[kind]
+		if not getter then return end
+		local list = getter()
+		if #list == 0 then
+			NYB.scan()
+			list = getter()
+		end
+		if #list == 0 then
+			NYB.msg("TP " .. kind .. ": belum ada yang ke-scan — coba Scan Ulang Map.")
+			return
+		end
+		S.tpIdx = S.tpIdx or {}
+		local i = (S.tpIdx[kind] or 0) + 1
+		if i > #list then i = 1 end
+		S.tpIdx[kind] = i
+		local part = partOf(kind, list[i])
+		if not part then
+			NYB.msg("TP " .. kind .. " #" .. i .. ": titiknya nggak ketemu.")
+			return
+		end
+		NYB.tpTo(part.Position)
+		NYB.msg(string.format("TP %s #%d", kind, i))
+	end
+
+	--=========== B. TELEPORT PLAYER ===========
+	local function hrpOf(name)
+		for _, plr in ipairs(Players:GetPlayers()) do
+			if plr ~= lp and plr.Name == name and plr.Character then
+				return plr.Character:FindFirstChild("HumanoidRootPart")
+			end
+		end
+		return nil
+	end
+
+	NYB.tpPlayer = function()
+		local name = CFG.TPPlayer
+		if not name or name == "" or name == "(pilih)" then
+			NYB.msg("Pilih dulu nama pemain di dropdown Select Player.")
+			return
+		end
+		local hrp = hrpOf(name)
+		if not hrp then
+			NYB.msg("TP player: " .. name .. " nggak ketemu (karakternya belum ada).")
+			return
+		end
+		NYB.tpTo(hrp.Position)
+		NYB.msg("TP ke " .. name)
+	end
+
+	NYB.tpNearestPlayer = function()
+		local my = NYB.hrp()
+		if not my then return end
+		local best, bd = nil, math.huge
+		for _, plr in ipairs(Players:GetPlayers()) do
+			if plr ~= lp and plr.Character then
+				local hrp = plr.Character:FindFirstChild("HumanoidRootPart")
+				if hrp then
+					local d = (hrp.Position - my.Position).Magnitude
+					if d < bd then bd = d; best = hrp; end
+				end
+			end
+		end
+		if best then
+			NYB.tpTo(best.Position)
+			NYB.msg(string.format("TP ke pemain terdekat (%.0f stud).", bd))
+		else
+			NYB.msg("Nggak ada pemain lain yang punya karakter.")
+		end
+	end
+end
+
 --===================== [ 13. UI BUILD ] ===================================
 do
 	local U = NYB.ui
@@ -8900,6 +9025,25 @@ do
 	U.dropdown(T.auto.page, "Gen Boost Mode", { "Manual Repair", "Auto Repair" }, "Manual Repair", "GenBoostMode", function(v) CFG.GenBoostMode = v end)
 	U.slider(T.auto.page, "Gen Boost Range", 4, 30, CFG.GenBoostRange, 0, function(v) CFG.GenBoostRange = v end)
 	U.button(T.auto.page, "Multi-Repair Generator Terdekat", NYB.genBoostNearest)
+
+	U.dropdown(T.aim.page, "Target Part (aimbot)", { "Torso", "Head", "Root" }, "Torso", "AimPart", function(v) CFG.AimPart = v end)
+
+	U.section(T.tp.page, "Teleport Map (port Aeris)")
+	U.button(T.tp.page, "TP Generator (gantian)", function() NYB.tpCycle("gen") end)
+	U.button(T.tp.page, "TP Hook (gantian)", function() NYB.tpCycle("hook") end)
+	U.button(T.tp.page, "TP Gate (gantian)", function() NYB.tpCycle("gate") end)
+	U.button(T.tp.page, "TP Pallet (gantian)", function() NYB.tpCycle("pallet") end)
+	U.button(T.tp.page, "TP Window (gantian)", function() NYB.tpCycle("window") end)
+
+	U.section(T.tp.page, "Teleport Player")
+	local tpPlayerOpts = { "(pilih)" }
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if plr ~= lp then table.insert(tpPlayerOpts, plr.Name) end
+	end
+	U.dropdown(T.tp.page, "Select Player", tpPlayerOpts, "(pilih)", "TPPlayer", function(v) CFG.TPPlayer = v end)
+	U.button(T.tp.page, "Teleport ke Player", NYB.tpPlayer)
+	U.button(T.tp.page, "Teleport ke Player Terdekat", NYB.tpNearestPlayer)
+	U.label(T.tp.page, "Daftar nama diambil waktu script di-load. Pemain yang join belakangan: pakai tombol terdekat.", NYB.ui.colors.dim)
 	U.label(T.auto.page, "Veil FOV nyala pas kamu Killer + spear mode; Flask Laser pas ngunyah flask.", NYB.ui.colors.dim)
 
 	U.section(T.auto.page, "Auto Drop Pallet")
