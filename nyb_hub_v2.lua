@@ -1021,6 +1021,10 @@ end)
 N.bind(RunService.Heartbeat, function(dt)
 	N.tickEsp(dt)
 	N.tickAuto(dt)
+	if tick() - (N.hudLast or 0) > 0.5 then
+		N.hudLast = tick()
+		pcall(N.ui.hudUpdate)
+	end
 end)
 
 N.bind(UIS.JumpRequest, function()
@@ -1128,6 +1132,63 @@ function N.ui.showReport(txt)
 	N.ui.report = sg
 end
 
+
+--===================== [ 14b. HUD LIVE ] ===================================
+-- Selalu tampil. Jadi buat tau fitur jalan atau nggak, lu cukup liat layar:
+-- toggle apa pun -> angka ON harus naik. Kalau ON naik tapi fitur diam,
+-- berarti jalur toggle SEHAT dan yang rusak implementasi fiturnya.
+N.ui.hud, N.ui.hudLbl = nil, nil
+
+N.ui.hudMake = function()
+	local parent = N.ui.gui or LP:FindFirstChild("PlayerGui")
+	if not parent then return end
+	local sg = Instance.new("ScreenGui")
+	sg.Name = "NYB2_HUD"
+	sg.ResetOnSpawn = false
+	sg.IgnoreGuiInset = true
+	sg.DisplayOrder = 9997
+	sg.Parent = parent
+	local f = Instance.new("Frame")
+	f.Size = UDim2.new(1, -16, 0, 138)
+	f.Position = UDim2.new(0, 8, 0, 34)
+	f.BackgroundColor3 = Color3.fromRGB(10, 12, 16)
+	f.BackgroundTransparency = 0.22
+	f.BorderSizePixel = 0
+	f.Parent = sg
+	local c = Instance.new("UICorner")
+	c.CornerRadius = UDim.new(0, 8)
+	c.Parent = f
+	local st = Instance.new("UIStroke")
+	st.Color = N.CFG.Accent
+	st.Thickness = 1
+	st.Transparency = 0.5
+	st.Parent = f
+	local l = Instance.new("TextLabel")
+	l.Size = UDim2.new(1, -10, 1, -8)
+	l.Position = UDim2.new(0, 5, 0, 4)
+	l.BackgroundTransparency = 1
+	l.TextColor3 = Color3.fromRGB(205, 255, 240)
+	l.TextSize = 12
+	l.Font = Enum.Font.Code
+	l.TextXAlignment = Enum.TextXAlignment.Left
+	l.TextYAlignment = Enum.TextYAlignment.Top
+	l.TextWrapped = true
+	l.Parent = f
+	N.ui.hud, N.ui.hudLbl = sg, l
+end
+
+N.ui.hudUpdate = function()
+	if not N.ui.hudLbl then return end
+	local on = 0
+	for _, f in ipairs(N.FEAT) do if N.CFG[f.key] then on = on + 1 end end
+	local head = string.format("NYB v2  alive=%s  conns=%d  esp=%d  ON=%d/%d",
+		tostring(N.alive), #N.conns, N.esp.count(), on, #N.FEAT)
+	local tail = {}
+	local from = math.max(1, #N.logLines - 5)
+	for i = from, #N.logLines do tail[#tail + 1] = "> " .. tostring(N.logLines[i]) end
+	N.ui.hudLbl.Text = head .. "\n" .. table.concat(tail, "\n")
+end
+
 --===================== [ 15. BOOT ] ========================================
 N.unload = function()
 	N.alive = false
@@ -1145,6 +1206,13 @@ end
 N.remotes.resolve()
 N.scan()
 N.buildUI()
+N.ui.hudMake()
+
+-- Self-test otomatis: begitu script di-load, panel laporan muncul sendiri.
+-- Gak perlu klik apa pun, gak perlu baca console.
+task.delay(8, function()
+	pcall(function() N.runSelfTest() end)
+end)
 
 task.wait(0.4)
 N.log(string.format("NYB HUB v2 loaded. remote=%d gen=%d", #N.remotes.list, #N.cache.gens))
