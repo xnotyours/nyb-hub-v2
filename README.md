@@ -2,10 +2,11 @@
 
 | | |
 |---|---|
-| Versi | **v2.7** |
-| File aktif | `nyb_hub_vanilla.lua` — 6.621 baris, ~245 KB |
+| Versi | **v2.8** |
+| File aktif | `nyb_hub_vanilla.lua` — 6.638 baris, ~248 KB |
 | Engine UI | pola **Aeris Hub (VD)** — kode diangkat **inline** ke dalam file, di-rebrand jadi NYB (`CreateAerisLibrary` → `CreateNYBLibrary`, `Aeris_*` → `NYB_*`) |
 | Dependensi luar | **nol** — gak pakai `loadstring`, gak fetch library pihak ketiga |
+| Key / whitelist | **tidak ada** — nol validasi, nol countdown key |
 | Target | [BUTCHER] Violence District (PlaceId `93978595733734`) |
 | Platform | Mobile (Delta / Hydrogen) + PC (Xeno / Wave / Swift) |
 

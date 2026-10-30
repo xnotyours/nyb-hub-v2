@@ -1,5 +1,5 @@
 --[[ ==========================================================================
-     N Y B   H U B   |   Violence District Toolkit            v2.7
+     N Y B   H U B   |   Violence District Toolkit            v2.8
      --------------------------------------------------------------------------
      File    : nyb_hub_vanilla.lua      (single file, nol dependensi luar)
      Engine  : UI pola Aeris Hub (VD) -- kodenya diangkat INLINE ke dalam file
@@ -8,6 +8,12 @@
                TANPA loadstring, TANPA fetch library pihak ketiga.
      Target  : [BUTCHER] Violence District      (PlaceId 93978595733734)
      Platform: Mobile (Delta / Hydrogen) + PC (Xeno / Wave / Swift)
+     Tanpa key: gak ada whitelist / validasi / countdown key di script ini.
+
+     v2.8 = KEY DIHAPUS: label countdown "Key: 23h 59m" + loop 1 detiknya
+            dibuang dari kartu profil, kartunya dikecilin 74 -> 56 px. Di file
+            ini emang gak pernah ada validasi key -- cuma tampilannya doang
+            yang nyisa dari engine Aeris.
 
      v2.7 = UI SCALE: ukuran window dulu dipatok mati 690x470 px -- di HP itu
             nutup hampir seluruh layar. Sekarang seluruh window di-skala lewat
@@ -1056,7 +1062,7 @@ local function CreateNYBLibrary()
 
         local tabList = Instance.new("ScrollingFrame")
         tabList.Name = "TabList"
-        tabList.Size = UDim2.new(1, -16, 1, -96)
+        tabList.Size = UDim2.new(1, -16, 1, -78)
         tabList.Position = UDim2.new(0, 8, 0, 8)
         tabList.BackgroundTransparency = 1
         tabList.ScrollBarThickness = 0
@@ -1064,11 +1070,11 @@ local function CreateNYBLibrary()
         tabList.AutomaticCanvasSize = Enum.AutomaticSize.Y
         tabList.Parent = sidebar
 
-        -- User Profile & Key Expiry Card (Bottom Left Corner)
+        -- User Profile Card (Bottom Left Corner)
         local profileCard = Instance.new("Frame")
         profileCard.Name = "UserProfileCard"
-        profileCard.Position = UDim2.new(0, 8, 1, -82)
-        profileCard.Size = UDim2.new(1, -16, 0, 74)
+        profileCard.Position = UDim2.new(0, 8, 1, -64)
+        profileCard.Size = UDim2.new(1, -16, 0, 56)
         profileCard.BackgroundColor3 = Color3.fromRGB(22, 14, 36)
         profileCard.BackgroundTransparency = 0.35
         profileCard.BorderSizePixel = 0
@@ -1123,7 +1129,7 @@ local function CreateNYBLibrary()
         dName.Size = UDim2.new(1, -54, 0, 15)
         dName.Parent = profileCard
 
-        -- Verified Status Badge
+        -- Status badge
         local statusBadge = Instance.new("TextLabel")
         statusBadge.Name = "StatusBadge"
         statusBadge.Text = "NYB Hub"
@@ -1132,43 +1138,9 @@ local function CreateNYBLibrary()
         statusBadge.TextColor3 = Color3.fromRGB(140, 255, 175)
         statusBadge.TextXAlignment = Enum.TextXAlignment.Left
         statusBadge.BackgroundTransparency = 1
-        statusBadge.Position = UDim2.new(0, 50, 0, 25)
+        statusBadge.Position = UDim2.new(0, 50, 0, 27)
         statusBadge.Size = UDim2.new(1, -54, 0, 14)
         statusBadge.Parent = profileCard
-
-        -- Key Expiry Countdown Label
-        local expiryLabel = Instance.new("TextLabel")
-        expiryLabel.Name = "KeyExpiry"
-        expiryLabel.Text = "Key: 24h 00m"
-        expiryLabel.Font = Enum.Font.Gotham
-        expiryLabel.TextSize = 10
-        expiryLabel.TextColor3 = Color3.fromRGB(200, 175, 235)
-        expiryLabel.TextXAlignment = Enum.TextXAlignment.Left
-        expiryLabel.BackgroundTransparency = 1
-        expiryLabel.Position = UDim2.new(0, 50, 0, 42)
-        expiryLabel.Size = UDim2.new(1, -54, 0, 14)
-        expiryLabel.Parent = profileCard
-
-        task.spawn(function()
-            while task.wait(1) do
-                if expiryLabel and expiryLabel.Parent then
-                    local verifiedTime = _G.NYBSessionTimestamp or os.time()
-                    local remaining = math.max(0, 86400 - (os.time() - verifiedTime))
-                    if remaining > 0 then
-                        local h = math.floor(remaining / 3600)
-                        local m = math.floor((remaining % 3600) / 60)
-                        local s = remaining % 60
-                        expiryLabel.Text = string.format("Key: %02dh %02dm %02ds", h, m, s)
-                        expiryLabel.TextColor3 = Color3.fromRGB(200, 175, 235)
-                    else
-                        expiryLabel.Text = "Key: Expired"
-                        expiryLabel.TextColor3 = Color3.fromRGB(255, 110, 130)
-                    end
-                else
-                    break
-                end
-            end
-        end)
 
         local tabLayout = Instance.new("UIListLayout")
         tabLayout.FillDirection = Enum.FillDirection.Vertical
@@ -6259,7 +6231,7 @@ do
 		NYB.msg("Remote di-resolve ulang.")
 	end)
 	U.section(T.misc.page, "Info")
-	U.label(T.misc.page, "NYB HUB v2.7 · engine UI pola Aeris (inline, rebrand NYB)\n"
+	U.label(T.misc.page, "NYB HUB v2.8 · engine UI pola Aeris (inline, rebrand NYB)\n"
 		.. "Place: " .. tostring(game.PlaceId) .. "\n"
 		.. "Hotkey: " .. tostring(CFG.Keybind):gsub("Enum.KeyCode.", "") .. " untuk show/hide\n"
 		.. "Kalau window ketutup di HP: tekan tombol NYB HUB di kiri atas.", NYB.ui.colors.dim)
@@ -6658,9 +6630,9 @@ task.spawn(function()
 	-- visual & FOV sengaja TIDAK diterapkan saat load (semua fitur default OFF,
 	-- jadi script tidak mengubah apa pun sampai kamu menyalakan togglenya)
 	NYB.ui.setStatus(string.format("remote: %d", NYB.remotes.count()))
-	NYB.ui.notify("NYB HUB v2.7 loaded", 4)
+	NYB.ui.notify("NYB HUB v2.8 loaded", 4)
 	task.wait(0.4)
 	NYB.ui.notify("Hotkey " .. tostring(CFG.Keybind):gsub("Enum.KeyCode.", "") .. " · Self Test di tab Main", 4)
 end)
 
-print("[NYB HUB] v2.7 loaded. Remote terdeteksi: " .. tostring(NYB.remotes.count()))
+print("[NYB HUB] v2.8 loaded. Remote terdeteksi: " .. tostring(NYB.remotes.count()))
