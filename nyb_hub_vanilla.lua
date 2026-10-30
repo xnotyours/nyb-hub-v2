@@ -348,6 +348,10 @@ local CFG = {
 	AntiSlowVault     = false,
 	AntiLoopVault     = false,
 	AntiLoopInterval  = 0.5,
+	-- ==== PORT GRUP 6 (Killer ekstra: Veil FOV + Flask Laser) ====
+	VeilFovShow      = false,
+	VeilFov          = 150,
+	FlaskLaser       = false,
 	FakeName       = "NYB HUB",
 }
 
@@ -8110,6 +8114,182 @@ do
 	end)
 end
 
+--===================== [ 11g. PORT AERIS: GRUP 6 ] ========================
+-- Port ADITIF dari source Aeris (grup 6 awal): Veil FOV circle + highlight
+-- (baris 8824-8840, config 4978-4980) dan Flask Laser killer (7377-7470).
+--
+-- BELUM di-port di blok ini: "Skill Hidden No CD" (BypassLeapEnabled) -- di
+-- sumber mekanismenya nempel di state-machine leap/aimbot killer (baris
+-- 7700-7815 + 17355), jadi butuh pembacaan dan penyambungan sendiri, bukan
+-- satu hook kecil. Catatan ini sengaja ditulis biar nggak ilang.
+--
+-- Key baru: VeilFovShow, VeilFov, FlaskLaser. Default OFF.
+do
+	local Players = game:GetService("Players")
+	local lp = Players.LocalPlayer
+	local RunService = game:GetService("RunService")
+	local cam = workspace.CurrentCamera
+	local S = NYB.state
+
+	local function guiHost()
+		local ok, hui = pcall(function() return gethui and gethui() or nil end)
+		if ok and hui then return hui end
+		return game:GetService("CoreGui")
+	end
+
+	--=========== A. VEIL FOV CIRCLE ===========
+	-- Waktu pegang spear (attribute "spearmode") dan Silent Veil nyala, tampil
+	-- lingkaran FOV + highlight survivor terdekat -- sama kayak Aeris, cuma
+	-- ukurannya ngikut slider.
+	local fovGui = Instance.new("ScreenGui")
+	fovGui.Name = "NYB_VeilFov"
+	fovGui.ResetOnSpawn = false
+	fovGui.IgnoreGuiInset = true
+	fovGui.DisplayOrder = 99990
+	local okHost = pcall(function() fovGui.Parent = guiHost() end)
+	if not okHost then pcall(function() fovGui.Parent = lp:WaitForChild("PlayerGui") end) end
+
+	local ring = Instance.new("Frame")
+	ring.Name = "Ring"
+	ring.AnchorPoint = Vector2.new(0.5, 0.5)
+	ring.Position = UDim2.fromScale(0.5, 0.5)
+	ring.BackgroundTransparency = 1
+	ring.Visible = false
+	ring.Parent = fovGui
+	local ringCorner = Instance.new("UICorner", ring)
+	ringCorner.CornerRadius = UDim.new(1, 0)
+	local ringStroke = Instance.new("UIStroke", ring)
+	ringStroke.Color = Color3.fromRGB(255, 90, 90)
+	ringStroke.Thickness = 1.5
+	ringStroke.Transparency = 0.25
+
+	local veilHl = Instance.new("Highlight")
+	veilHl.Name = "NYB_VeilHl"
+	veilHl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+	veilHl.FillColor = Color3.fromRGB(255, 70, 70)
+	veilHl.FillTransparency = 0.6
+	veilHl.OutlineTransparency = 0.2
+	veilHl.Enabled = false
+	veilHl.Parent = cam
+
+	local function nearestSurvivor()
+		local hrp = NYB.hrp()
+		if not hrp then return nil end
+		local best, bd = nil, math.huge
+		for _, plr in ipairs(Players:GetPlayers()) do
+			if plr ~= lp and not NYB.isKiller(plr) and plr.Character then
+				local c = plr.Character:FindFirstChild("HumanoidRootPart")
+				local hum = plr.Character:FindFirstChildOfClass("Humanoid")
+				if c and hum and hum.Health > 0 then
+					local d = (c.Position - hrp.Position).Magnitude
+					if d < bd and d <= 400 then bd = d; best = c end
+				end
+			end
+		end
+		return best
+	end
+
+	NYB.bind(RunService.Heartbeat, function()
+		if not NYB.alive then return end
+		local char = NYB.char()
+		local spearMode = char and char:GetAttribute("spearmode") == true
+		local show = CFG.SpearSilent and CFG.VeilFovShow and spearMode
+		if not show then
+			if ring.Visible then ring.Visible = false end
+			if veilHl.Enabled then veilHl.Enabled = false end
+			return
+		end
+		ring.Visible = true
+		local size = math.max(10, CFG.VeilFov * 2)
+		ring.Size = UDim2.new(0, size, 0, size)
+		local tgt = nearestSurvivor()
+		if tgt then
+			veilHl.Adornee = tgt.Parent
+			veilHl.Enabled = true
+		elseif veilHl.Enabled then
+			veilHl.Enabled = false
+		end
+	end)
+
+	table.insert(NYB.cleanups, function()
+		pcall(function() fovGui:Destroy() end)
+		pcall(function() veilHl:Destroy() end)
+	end)
+
+	--=========== B. FLASK LASER (KILLER) ===========
+	-- Garis neon dari tangan kiri ke survivor terdekat, cuma muncul waktu
+	-- game lagi jalanin aksi flask (LocalScript dengan attribute action).
+	-- Nyala sendiri kalau CFG.FlaskLaser; nggak ngirim remote apa pun.
+	local function flaskLaserStep()
+		local char = NYB.char()
+		if not char then
+			if S.flaskLaser then S.flaskLaser.Transparency = 1 end
+			return
+		end
+		local hrp = char:FindFirstChild("HumanoidRootPart")
+		if not hrp then
+			if S.flaskLaser then S.flaskLaser.Transparency = 1 end
+			return
+		end
+		local hand = char:FindFirstChild("LeftHand") or char:FindFirstChild("Left Arm")
+		local from = (hand and hand.Position) or hrp.Position
+
+		local target = NYB.isKiller(lp) and nearestSurvivor() or nil
+		local to = target and target.Position
+
+		-- Tanda aksi flask main: LocalScript ber-attribute action di karakter.
+		local acting = false
+		for _, c in ipairs(char:GetChildren()) do
+			if c:IsA("LocalScript") and c:GetAttribute("action") == true then
+				acting = true
+				break
+			end
+		end
+
+		if not (to and acting) then
+			if S.flaskLaser then S.flaskLaser.Transparency = 1 end
+			return
+		end
+
+		if not S.flaskLaser or not S.flaskLaser.Parent then
+			local p = Instance.new("Part")
+			p.Name = "NYB_FlaskLaser"
+			p.Anchored = true
+			p.CanCollide = false
+			p.CanTouch = false
+			p.CanQuery = false
+			p.CastShadow = false
+			p.Material = Enum.Material.Neon
+			p.Color = Color3.fromRGB(255, 50, 50)
+			p.Parent = workspace
+			S.flaskLaser = p
+		end
+		local p = S.flaskLaser
+		local d = to - from
+		if d.Magnitude > 0.1 then
+			p.Size = Vector3.new(0.16, 0.16, d.Magnitude)
+			p.CFrame = CFrame.new((from + to) / 2, to)
+			p.Transparency = 0
+		end
+	end
+
+	NYB.bind(RunService.RenderStepped, function()
+		if not NYB.alive then return end
+		if not CFG.FlaskLaser then
+			if S.flaskLaser and S.flaskLaser.Transparency ~= 1 then S.flaskLaser.Transparency = 1 end
+			return
+		end
+		pcall(flaskLaserStep)
+	end)
+
+	table.insert(NYB.cleanups, function()
+		if S.flaskLaser then
+			pcall(function() S.flaskLaser:Destroy() end)
+			S.flaskLaser = nil
+		end
+	end)
+end
+
 --===================== [ 13. UI BUILD ] ===================================
 do
 	local U = NYB.ui
@@ -8436,6 +8616,12 @@ do
 	U.label(T.auto.page, "Nyalain = semua VaultTrigger/PalletSlide di map dikirim 'in use' biar killer nggak bisa looping. Matiin = dibalikin.", NYB.ui.colors.dim)
 	local crouchTally = U.label(T.auto.page, "Auto Crouch trigger: 0x")
 	NYB.crouchLbl = crouchTally
+
+	U.section(T.auto.page, "Killer Ekstra (port Aeris)")
+	U.toggle(T.auto.page, "Silent Veil FOV Circle", "VeilFovShow", function(v) CFG.VeilFovShow = v end)
+	U.slider(T.auto.page, "Veil FOV Radius", 30, 500, CFG.VeilFov, 0, function(v) CFG.VeilFov = v end)
+	U.toggle(T.auto.page, "Flask Laser (killer)", "FlaskLaser", function(v) CFG.FlaskLaser = v end)
+	U.label(T.auto.page, "Veil FOV nyala pas kamu Killer + spear mode; Flask Laser pas ngunyah flask.", NYB.ui.colors.dim)
 
 	U.section(T.auto.page, "Auto Drop Pallet")
 	U.toggle(T.auto.page, "Auto Drop Pallet (killer deket)", "AutoPallet", function(v) NYB.autoPalletToggle(v) end)
