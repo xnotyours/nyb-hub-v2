@@ -1,10 +1,19 @@
 --[[ ==========================================================================
-     N Y B   H U B   |   Violence District Toolkit            v2.6
+     N Y B   H U B   |   Violence District Toolkit            v2.7
      --------------------------------------------------------------------------
-     File    : nyb_hub_vanilla.lua      (file baru, engine sendiri)
-     Engine  : vanilla UI buatan sendiri -- TANPA Rayfield, TANPA loadstring
+     File    : nyb_hub_vanilla.lua      (single file, nol dependensi luar)
+     Engine  : UI pola Aeris Hub (VD) -- kodenya diangkat INLINE ke dalam file
+               ini lalu di-rebrand jadi NYB (CreateAerisLibrary ->
+               CreateNYBLibrary, Aeris_* -> NYB_*, watermark/hub -> "NYB Hub").
+               TANPA loadstring, TANPA fetch library pihak ketiga.
      Target  : [BUTCHER] Violence District      (PlaceId 93978595733734)
      Platform: Mobile (Delta / Hydrogen) + PC (Xeno / Wave / Swift)
+
+     v2.7 = UI SCALE: ukuran window dulu dipatok mati 690x470 px -- di HP itu
+            nutup hampir seluruh layar. Sekarang seluruh window di-skala lewat
+            UIScale: auto-fit ke viewport (maks 82% lebar / 88% tinggi) x
+            slider manual 0.40-1.30, dihitung ulang saat layar diputar.
+            Kontrolnya di tab Misc -> UI (+ tombol Reset Ukuran Window).
 
      v2.6 = 8 BIT CROWN (cosmetic): port 1:1 dari asset katalog Roblox
             "8-Bit Royal Crown" (assetId 10159600649) -- MeshId/TextureId asli
@@ -89,6 +98,8 @@ local CFG = {
 	-- UI
 	Keybind        = Enum.KeyCode.RightShift,
 	Accent         = Color3.fromRGB(0, 210, 190),
+	UIScaleAuto    = true,
+	UIScale        = 0.9,
 	-- ESP
 	EspPlayers     = false,
 	EspChams       = false,
@@ -821,6 +832,59 @@ local function CreateNYBLibrary()
 
         lib:ApplyShimmer(mainFrame, 2.2)
 
+        -- ==== UI SCALE (auto-fit layar + slider manual) ====
+        -- Ukuran dasar window 690x470 px. Di HP ukuran itu nutup hampir seluruh
+        -- layar, jadi seluruh window (dan anak-anaknya) di-skala lewat UIScale.
+        -- Skala = autoFit(viewport) x userScale, dan dihitung ulang tiap kali
+        -- ViewportSize berubah (rotasi layar / masuk split-screen).
+        local BASE_W, BASE_H = 690, 470
+        local mainScale = Instance.new("UIScale")
+        mainScale.Name = "NYBUIScale"
+        mainScale.Parent = mainFrame
+
+        local function viewportSize()
+            local cam = workspace.CurrentCamera
+            local vp = cam and cam.ViewportSize
+            if not vp or vp.X <= 0 or vp.Y <= 0 then
+                return Vector2.new(BASE_W, BASE_H)
+            end
+            return vp
+        end
+
+        -- Window dibatasi maksimal 82% lebar & 88% tinggi viewport, dan
+        -- tidak pernah diperbesar melebihi ukuran dasar.
+        local function autoFitScale()
+            local vp = viewportSize()
+            local fitW = (vp.X * 0.82) / BASE_W
+            local fitH = (vp.Y * 0.88) / BASE_H
+            return math.clamp(math.min(fitW, fitH, 1), 0.40, 1)
+        end
+
+        local function userScale()
+            if type(CFG) ~= "table" then return 1 end
+            return math.clamp(tonumber(CFG.UIScale) or 1, 0.40, 1.30)
+        end
+
+        local function applyScale()
+            local auto = (type(CFG) ~= "table") or (CFG.UIScaleAuto ~= false)
+            mainScale.Scale = (auto and autoFitScale() or 1) * userScale()
+        end
+
+        local function hookCamera()
+            local cam = workspace.CurrentCamera
+            if not cam then return end
+            cam:GetPropertyChangedSignal("ViewportSize"):Connect(applyScale)
+        end
+        hookCamera()
+        workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
+            task.defer(function()
+                hookCamera()
+                applyScale()
+            end)
+        end)
+
+        applyScale()
+
         -- Header Frame (Draggable)
         local header = Instance.new("Frame")
         header.Name = "Header"
@@ -941,7 +1005,10 @@ local function CreateNYBLibrary()
         end)
         UserInputService.InputChanged:Connect(function(input)
             if isDragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
-                local delta = input.Position - dragStart
+                -- delta mouse ada di ruang piksel layar, sedangkan Position offset
+                -- window ikut di-skala -> bagi dengan skala biar geraknya 1:1 sama jari
+                local sc = math.max(mainScale.Scale, 0.05)
+                local delta = (input.Position - dragStart) / sc
                 mainFrame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
             end
         end)
@@ -1141,10 +1208,17 @@ local function CreateNYBLibrary()
         end)
         UserInputService.InputChanged:Connect(function(input)
             if isResizing and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
-                local delta = input.Position - resizeStartMouse
-                -- Limits: Min width 580px, Max width 1100px; Min height 380px, Max height 750px
-                local newW = math.clamp(resizeStartSize.X + delta.X, 580, 1100)
-                local newH = math.clamp(resizeStartSize.Y + delta.Y, 380, 750)
+                local sc = math.max(mainScale.Scale, 0.05)
+                local delta = (input.Position - resizeStartMouse) / sc
+                -- AbsoluteSize sudah ikut skala -> balikin ke ukuran dasar dulu
+                local baseW = resizeStartSize.X / sc
+                local baseH = resizeStartSize.Y / sc
+                -- Batas atas ikut viewport, jadi window gak bisa ditarik lebih besar dari layar
+                local vp = viewportSize()
+                local maxW = math.max(420, (vp.X * 0.98) / sc)
+                local maxH = math.max(340, (vp.Y * 0.98) / sc)
+                local newW = math.clamp(baseW + delta.X, 420, maxW)
+                local newH = math.clamp(baseH + delta.Y, 340, maxH)
                 mainFrame.Size = UDim2.new(0, newW, 0, newH)
             end
         end)
@@ -1155,7 +1229,20 @@ local function CreateNYBLibrary()
             Tabs = {},
             CurrentTab = nil,
             IsMinimized = false,
-            IsLocked = false
+            IsLocked = false,
+            -- UI scale API (dipakai tab Misc -> UI)
+            ApplyScale = applyScale,
+            AutoFitScale = autoFitScale,
+            GetScale = function() return mainScale.Scale end,
+            ResetSize = function()
+                if type(CFG) == "table" then
+                    CFG.UIScaleAuto = true
+                    CFG.UIScale = 0.9
+                end
+                mainFrame.Size = UDim2.new(0, BASE_W, 0, BASE_H)
+                mainFrame.Position = UDim2.new(0.5, 0, 0.5, 0)
+                applyScale()
+            end,
         }
 
         local originalSize = mainFrame.Size
@@ -2865,7 +2952,11 @@ NYB.ui.window          = { Visible = true }
 NYB.ui.status          = ""
 NYB.ui.sticky          = nil
 NYB.ui.stickyLbl       = nil
-NYB.ui.applyResponsive = function() end
+NYB.ui.applyResponsive = function()
+	local w = NYB.ui.win
+	if type(w) == "table" and type(w.ApplyScale) == "function" then w.ApplyScale() end
+end
+NYB.ui.applyScale = NYB.ui.applyResponsive
 NYB.ui.stickyTick      = function() end
 
 -- host overlay buat ESP / aim / crosshair (engine-nya punya GUI sendiri,
@@ -6096,6 +6187,18 @@ do
 		NYB.applyAvatarOf(lp)
 	end)
 
+	U.section(T.misc.page, "UI")
+	U.toggle(T.misc.page, "Auto Fit Layar (HP)", "UIScaleAuto", function() NYB.ui.applyScale() end)
+	U.slider(T.misc.page, "UI Scale", 0.40, 1.30, CFG.UIScale or 0.9, 2, function(v)
+		CFG.UIScale = v
+		NYB.ui.applyScale()
+	end)
+	U.button(T.misc.page, "Reset Ukuran Window", function()
+		if type(NYB.ui.win) == "table" and type(NYB.ui.win.ResetSize) == "function" then
+			NYB.ui.win.ResetSize()
+		end
+		NYB.msg("Ukuran window direset ke auto-fit.")
+	end)
 	U.section(T.misc.page, "Config")
 	U.button(T.misc.page, "Save Config (NYB_HUB/config.json)", NYB.saveConfig)
 	U.button(T.misc.page, "Load Config", NYB.loadConfig)
@@ -6110,7 +6213,7 @@ do
 		NYB.msg("Remote di-resolve ulang.")
 	end)
 	U.section(T.misc.page, "Info")
-	U.label(T.misc.page, "NYB HUB v2.6 · engine UI sendiri (tanpa Rayfield)\n"
+	U.label(T.misc.page, "NYB HUB v2.7 · engine UI pola Aeris (inline, rebrand NYB)\n"
 		.. "Place: " .. tostring(game.PlaceId) .. "\n"
 		.. "Hotkey: " .. tostring(CFG.Keybind):gsub("Enum.KeyCode.", "") .. " untuk show/hide\n"
 		.. "Kalau window ketutup di HP: tekan tombol NYB HUB di kiri atas.", NYB.ui.colors.dim)
