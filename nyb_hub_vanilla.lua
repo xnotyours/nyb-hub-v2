@@ -59,8 +59,27 @@
 --===================== [ 0. LOAD GUARD ] ==================================
 local NYB_ENV = (getgenv and getgenv()) or _G
 if NYB_ENV.NYB_HUB_RUNNING then
-	warn("[NYB HUB] Script sudah jalan. Tekan Unload dulu sebelum reload.")
-	return
+	-- Instance sebelumnya masih nempel. Dulu di sini kita cuma `warn()` lalu
+	-- `return` -- dan di executor yang nyembunyiin warn(), efeknya persis
+	-- seperti "script gak jalan": nggak ada window, nggak ada error.
+	-- Sekarang: matikan instance lama otomatis, terus lanjut load yang baru.
+	if type(NYB_ENV.NYB_UNLOAD) == "function" then
+		local okU, errU = pcall(NYB_ENV.NYB_UNLOAD)
+		if not okU then
+			warn("[NYB HUB] gagal unload instance lama: " .. tostring(errU))
+		end
+	else
+		warn("[NYB HUB] instance lama gak punya hook unload -- GUI lama dibersihin paksa.")
+		for _, name in ipairs({ "NYB_MainHub", "NYB_Notifications", "NYB_Watermark",
+			"NYB_HUB_Overlay", "NYB_AimFov", "NYB_Crosshair", "NYB_Info", "NYB_DashLock" }) do
+			pcall(function()
+				local p = (gethui and gethui()) or game:GetService("CoreGui")
+				local g = p:FindFirstChild(name)
+				if g then g:Destroy() end
+			end)
+		end
+	end
+	NYB_ENV.NYB_HUB_RUNNING = nil
 end
 NYB_ENV.NYB_HUB_RUNNING = true
 
@@ -5678,10 +5697,37 @@ do
 		NYB.esp.clear()
 		pcall(NYB.stopRepair)
 		pcall(function() NYB.flyToggle(false) end)
+		-- Bersihin SEMUA ScreenGui yang kita bikin, bukan cuma overlay.
+		-- Sebelumnya cuma NYB.ui.gui yang di-destroy, jadi window utama,
+		-- notifikasi, watermark, FOV aim, crosshair, dan info overlay tetap
+		-- nangkring di layar. Habis itu reload bikin window dobel: yang lama
+		-- udah mati (toggle-nya gak nyambung) tapi masih ketutup yang baru.
+		local GUI_NAMES = {
+			"NYB_MainHub", "NYB_Notifications", "NYB_Watermark", "NYB_HUB_Overlay",
+			"NYB_AimFov", "NYB_Crosshair", "NYB_Info", "NYB_DashLock",
+		}
+		local function wipe(parent)
+			if not parent then return end
+			for _, name in ipairs(GUI_NAMES) do
+				local g = parent:FindFirstChild(name)
+				if g then pcall(function() g:Destroy() end) end
+			end
+		end
+		pcall(function() wipe((gethui and gethui()) or game:GetService("CoreGui")) end)
+		pcall(function() wipe(game:GetService("CoreGui")) end)
+		pcall(function()
+			local lp = game:GetService("Players").LocalPlayer
+			wipe(lp and lp:FindFirstChild("PlayerGui"))
+		end)
 		pcall(function() NYB.ui.gui:Destroy() end)
 		NYB_ENV.NYB_HUB_RUNNING = nil
+		NYB_ENV.NYB_UNLOAD = nil
 		print("[NYB HUB] Unloaded.")
 	end
+
+	-- diekspor biar load berikutnya bisa ngebunuh instance ini sendiri
+	-- (lihat LOAD GUARD di baris paling atas)
+	NYB_ENV.NYB_UNLOAD = NYB.unload
 end
 
 --===================== [ 13. UI BUILD ] ===================================
@@ -6612,9 +6658,9 @@ task.spawn(function()
 	-- visual & FOV sengaja TIDAK diterapkan saat load (semua fitur default OFF,
 	-- jadi script tidak mengubah apa pun sampai kamu menyalakan togglenya)
 	NYB.ui.setStatus(string.format("remote: %d", NYB.remotes.count()))
-	NYB.ui.notify("NYB HUB v2.6 loaded", 4)
+	NYB.ui.notify("NYB HUB v2.7 loaded", 4)
 	task.wait(0.4)
 	NYB.ui.notify("Hotkey " .. tostring(CFG.Keybind):gsub("Enum.KeyCode.", "") .. " · Self Test di tab Main", 4)
 end)
 
-print("[NYB HUB] v2.6 loaded. Remote terdeteksi: " .. tostring(NYB.remotes.count()))
+print("[NYB HUB] v2.7 loaded. Remote terdeteksi: " .. tostring(NYB.remotes.count()))
