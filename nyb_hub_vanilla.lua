@@ -150,6 +150,11 @@ local CFG = {
 	KillerPerks    = false,
 	StunRing       = false,
 	Spectator      = false,
+	-- UI Config (port Aeris)
+	UILocked       = false,
+	UITransparency = false,
+	Watermark      = true,
+	MobileBtnAlways= false,
 	-- ESP
 	EspPlayers     = false,
 	EspChams       = false,
@@ -6430,6 +6435,168 @@ do
 	end)
 end
 
+--===================== [ 11d. PORT AERIS: COPY AVATAR + UI CONFIG ] ========
+-- Port ADITIF dari source Aeris (baris 14323-14630, 17297-17321).
+-- Copy Avatar: dropdown pilih pemain + sistem favorit (disimpan ke file).
+-- UI Config: transparansi window, lock posisi, watermark, tombol mobile.
+do
+	--==== COPY AVATAR ====
+	local FAV_FOLDER = "NYB_HUB"
+	local FAV_FILE = FAV_FOLDER .. "/avatar_favorites.json"
+
+	local function favLoad()
+		local out = {}
+		pcall(function()
+			if type(readfile) ~= "function" then return end
+			local txt = readfile(FAV_FILE)
+			if not txt or txt == "" then return end
+			local data = HttpService:JSONDecode(txt)
+			if type(data) == "table" then out = data end
+		end)
+		return out
+	end
+
+	local function favSave(list)
+		return (pcall(function()
+			if type(writefile) ~= "function" then error("executor tidak punya writefile") end
+			if type(makefolder) == "function" and type(isfolder) == "function"
+				and not isfolder(FAV_FOLDER) then
+				makefolder(FAV_FOLDER)
+			end
+			writefile(FAV_FILE, HttpService:JSONEncode(list))
+		end))
+	end
+
+	local function favLabel(f)
+		return tostring(f.Name or "?") .. " (" .. tostring(f.Id) .. ")"
+	end
+
+	local function favLabels(list)
+		local out = {}
+		for _, f in ipairs(list or {}) do
+			table.insert(out, favLabel(f))
+		end
+		if #out == 0 then table.insert(out, "- kosong -") end
+		return out
+	end
+
+	NYB.playerNames = function()
+		local out = {}
+		for _, p in ipairs(Players:GetPlayers()) do
+			table.insert(out, p.Name)
+		end
+		if #out == 0 then table.insert(out, "- kosong -") end
+		return out
+	end
+
+	-- applyAvatarOf() yang sudah ada butuh objek Player; ini versi yang butuh
+	-- UserId saja, supaya favorit bisa dipakai walau pemainnya udah keluar.
+	NYB.avatarByUserId = function(id, label)
+		local hum = NYB.hum()
+		if not hum then NYB.msg("Kamu belum spawn.") return end
+		local ok = pcall(function()
+			local desc = Players:GetHumanoidDescriptionFromUserId(tonumber(id) or 0)
+			hum:ApplyDescription(desc)
+		end)
+		NYB.msg(ok and ("Avatar dipasang: " .. tostring(label or id)) or "Gagal pasang avatar.")
+	end
+
+	NYB.avatarFav = {}
+	NYB.avatarFav.list = favLoad()
+	NYB.avatarFav.labels = function() return favLabels(NYB.avatarFav.list) end
+	NYB.avatarFav.add = function(name, id)
+		id = tonumber(id) or 0
+		for _, f in ipairs(NYB.avatarFav.list) do
+			if tonumber(f.Id) == id then NYB.msg("Udah ada di favorit.") return false end
+		end
+		table.insert(NYB.avatarFav.list, { Name = tostring(name or "?"), Id = id })
+		local ok = favSave(NYB.avatarFav.list)
+		NYB.msg(ok and "Ditambah ke favorit." or "Gagal simpan favorit (butuh writefile).")
+		return ok
+	end
+	NYB.avatarFav.del = function(label)
+		for i, f in ipairs(NYB.avatarFav.list) do
+			if favLabel(f) == tostring(label or "") then
+				table.remove(NYB.avatarFav.list, i)
+				favSave(NYB.avatarFav.list)
+				NYB.msg("Favorit dihapus.")
+				return true
+			end
+		end
+		NYB.msg("Favorit nggak ketemu.")
+		return false
+	end
+	NYB.avatarFav.pick = function(label)
+		for _, f in ipairs(NYB.avatarFav.list) do
+			if favLabel(f) == tostring(label or "") then
+				NYB.avatarByUserId(f.Id, f.Name)
+				return true
+			end
+		end
+		return false
+	end
+
+	--==== UI CONFIG ====
+	local lockGuard = nil
+
+	NYB.uiLock = function(on)
+		local win = NYB.ui.win
+		if type(win) ~= "table" then return end
+		if type(win.SetLocked) == "function" then
+			pcall(function() win:SetLocked(on and true or false) end)
+		end
+		if lockGuard then pcall(function() lockGuard:Destroy() end) lockGuard = nil end
+		if not on then return end
+
+		-- Engine-nya udah expose SetLocked(), tapi handler drag-nya nggak ngecek
+		-- flag itu -- jadi kunci posisi nggak ngefek. Daripada ngutak-atik
+		-- handler-nya, header-nya kita tutup pakai frame transparan: input ke
+		-- header keblok (window nggak bisa digeser), toggle di dalam tetap bisa.
+		local frame = win.Frame
+		local header = frame and frame:FindFirstChild("Header")
+		if not header then return end
+		local ov = Instance.new("Frame")
+		ov.Name = "NYB_LockGuard"
+		ov.Size = UDim2.new(1, 0, 1, 0)
+		ov.BackgroundTransparency = 1
+		ov.Active = true
+		ov.ZIndex = 300
+		ov.Parent = header
+		lockGuard = ov
+	end
+
+	NYB.uiTransparency = function(on)
+		local win = NYB.ui.win
+		local frame = (type(win) == "table") and win.Frame or nil
+		if not frame then return end
+		pcall(function()
+			frame.BackgroundTransparency = on and 0.55 or 0.20
+			local header = frame:FindFirstChild("Header")
+			if header then header.BackgroundTransparency = on and 0.65 or 0.35 end
+			local side = frame:FindFirstChild("Sidebar")
+			if side then side.BackgroundTransparency = on and 0.65 or 0.35 end
+		end)
+	end
+
+	NYB.watermark = function(on)
+		local lib = NYB.ui.lib
+		if type(lib) == "table" and type(lib.SetWatermark) == "function" then
+			pcall(function() lib:SetWatermark(on and true or false) end)
+		end
+	end
+
+	NYB.mobileAlways = function(on)
+		local win = NYB.ui.win
+		if type(win) == "table" and type(win.SetAlwaysShowMobileButton) == "function" then
+			pcall(function() win:SetAlwaysShowMobileButton(on and true or false) end)
+		end
+	end
+
+	table.insert(NYB.cleanups, function()
+		if lockGuard then pcall(function() lockGuard:Destroy() end) lockGuard = nil end
+	end)
+end
+
 --===================== [ 12. SELF TEST + UNLOAD ] =========================
 do
 	NYB.selfTest = function()
@@ -7118,8 +7285,45 @@ do
 		NYB.applyAvatarOf(lp)
 	end)
 
+	--======== COPY AVATAR (lengkap, port Aeris) ========
+	U.section(T.misc.page, "Copy Avatar (lengkap)")
+	local avaSel = U.dropdown(T.misc.page, "Select Avatar", NYB.playerNames(), nil, nil, function() end)
+	local favSel = U.dropdown(T.misc.page, "Favorites", NYB.avatarFav.labels(), nil, nil, function(v)
+		NYB.avatarFav.pick(v)
+	end)
+	local function selectedAvatarPlayer()
+		local nm = avaSel and avaSel.get and avaSel.get()
+		if not nm then return nil end
+		for _, p in ipairs(Players:GetPlayers()) do
+			if p.Name == nm or p.DisplayName == nm then return p end
+		end
+		return nil
+	end
+	U.button(T.misc.page, "Apply Avatar", function()
+		local p = selectedAvatarPlayer()
+		if p then NYB.applyAvatarOf(p) else NYB.msg("Pilih pemain dulu.") end
+	end)
+	U.button(T.misc.page, "Add to Favorite", function()
+		local p = selectedAvatarPlayer()
+		if not p then NYB.msg("Pilih pemain dulu.") return end
+		if NYB.avatarFav.add(p.Name, p.UserId) and favSel and favSel.el then
+			pcall(function() favSel.el:SetValues(NYB.avatarFav.labels()) end)
+		end
+	end)
+	U.button(T.misc.page, "Delete Favorite", function()
+		local lbl = favSel and favSel.get and favSel.get()
+		if not lbl then NYB.msg("Pilih favorit dulu.") return end
+		if NYB.avatarFav.del(lbl) and favSel and favSel.el then
+			pcall(function() favSel.el:SetValues(NYB.avatarFav.labels()) end)
+		end
+	end)
+
 	U.section(T.misc.page, "UI")
 	U.toggle(T.misc.page, "Auto Fit Layar (HP)", "UIScaleAuto", function() NYB.ui.applyScale() end)
+	U.toggle(T.misc.page, "Transparan Window", "UITransparency", function(v) NYB.uiTransparency(v) end)
+	U.toggle(T.misc.page, "Lock GUI (kunci posisi)", "UILocked", function(v) NYB.uiLock(v) end)
+	U.toggle(T.misc.page, "Watermark", "Watermark", function(v) NYB.watermark(v) end)
+	U.toggle(T.misc.page, "Selalu Tampilkan Tombol Mobile", "MobileBtnAlways", function(v) NYB.mobileAlways(v) end)
 	U.slider(T.misc.page, "UI Scale", 0.40, 1.30, CFG.UIScale or 0.9, 2, function(v)
 		CFG.UIScale = v
 		NYB.ui.applyScale()
